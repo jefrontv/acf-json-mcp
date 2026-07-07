@@ -1,0 +1,32 @@
+{
+  "name": "acf-json-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server for safely editing ACF acf-json/*.json field groups — collision-free keys, type-correct defaults, back-ref integrity, validation, and WP DB sync. Installable into Claude Code, Cursor, and any MCP client.",
+  "bin": {
+    "acf-json-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "start": "node dist/index.js",
+    "start:src": "bun run src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js",
+    "build:bun": "bun build src/index.ts --compile --outfile dist/acf-json-mcp",
+    "prebuild": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\"",
+    "postinstall": "node scripts/add-claude.mjs --skip-if-missing || true",
+    "add-claude": "node scripts/add-claude.mjs",
+    "test": "node tests/run-all.mjs",
+    "test:smoke": "node tests/smoke.test.mjs",
+    "test:mutation": "node tests/mutation.test.mjs",
+    "test:write": "node tests/write.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "@types/node": "^26.0.1"
+  }
+}

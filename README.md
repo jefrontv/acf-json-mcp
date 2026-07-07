@@ -83,7 +83,19 @@ npm run install:claude -- --project-root ~/Sites/my-wp-theme
 npm run install:claude -- --scope local
 ```
 
-Idempotent: re-running skips the clone, rebuilds, and treats "already registered" as success. The `claude` CLI is optional — if missing, the installer stops after build and prints the manual registration command.
+Idempotent: re-running on an existing checkout **pulls latest** (`git fetch` + `--ff-only` fast-forward — never merges or rebases local work), rebuilds, and treats "already registered" as success. The `claude` CLI is optional — if missing, the installer stops after build and prints the manual registration command.
+
+### Updating
+
+Re-run the same command you installed with:
+
+```sh
+cd <path-to-clone> && npm run install:claude
+```
+
+The installer fetches + fast-forwards to `origin/master`, reinstalls deps, rebuilds `dist/index.js`, and re-registers with Claude Code (no-op if already registered). If you have local commits that diverge from `origin/master`, the `--ff-only` merge fails safely with a clear error — resolve manually, then re-run.
+
+There is no in-app auto-update. The MCP server has no notion of its own version; updates come from re-running the installer. Claude Code picks up the new `dist/index.js` on the next MCP session restart.
 
 ### Manual
 

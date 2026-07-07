@@ -61,9 +61,15 @@ function has(bin) {
 
 console.log("acf-json-mcp installer\n");
 
-// 1. Clone (skip if dir already has .git or a package.json)
-if (existsSync(resolve(dest, "package.json")) || existsSync(resolve(dest, ".git"))) {
-  console.log(`1/4  clone: skip (already exists at ${dest})`);
+// 1. Clone or update: if dest is already a checkout, pull latest; else clone.
+if (existsSync(resolve(dest, ".git"))) {
+  console.log(`1/4  pull: ${dest}`);
+  run("git", ["-C", dest, "fetch", "origin"]);
+  // Fast-forward only — never merge/rebase user's local work.
+  run("git", ["-C", dest, "merge", "--ff-only", "origin/HEAD"]);
+} else if (existsSync(resolve(dest, "package.json"))) {
+  console.log(`1/4  clone: skip (non-git dir at ${dest})`);
+  console.log("          remove it first if you want a fresh clone.");
 } else {
   console.log(`1/4  clone: ${REPO} -> ${dest}`);
   mkdirSync(dirname(dest), { recursive: true });

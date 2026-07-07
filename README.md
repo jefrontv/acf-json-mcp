@@ -51,19 +51,49 @@ All tools take an optional `projectRoot` (default: the `ACF_JSON_PROJECT_ROOT` e
 - [Node.js](https://nodejs.org) ≥ 20 (runtime). No Bun required.
 - A project containing an `acf-json/` directory (ACF PRO local JSON sync).
 
-### Build the server
+### One-line installer (clone + build + register with Claude Code)
 
 ```sh
-git clone <this repo> && cd acf-json-mcp
+npx --yes https://bitbucket.org/efront_au/acf-json-mcp/raw/master/scripts/install.mjs
+```
+
+Or, if you've already cloned the repo:
+
+```sh
+npm run install:claude
+```
+
+What it does:
+1. Clones `efront_au/acf-json-mcp` into `~/Documents/Sites/acf-json-mcp` (or `--dest <path>`). Skips if already present.
+2. `npm install` (skips the postinstall hook so it doesn't pre-register with the wrong project root).
+3. `npm run build` → `dist/index.js`.
+4. Registers with Claude Code via `claude mcp add` (default scope: `user`).
+
+Flags:
+- `--dest <path>` — clone destination (default: `~/Documents/Sites/acf-json-mcp`).
+- `--project-root <path>` — WP project root passed to the server (default: `ACF_JSON_PROJECT_ROOT` env or cwd).
+- `--scope <local|user|project>` — Claude Code scope (default: `user`).
+
+```sh
+# clone elsewhere + pin to a WP project
+npx --yes https://bitbucket.org/efront_au/acf-json-mcp/raw/master/scripts/install.mjs --dest ~/src/acf-json-mcp --project-root ~/Sites/my-theme
+```
+
+Idempotent: re-running skips the clone, rebuilds, and treats "already registered" as success. The `claude` CLI is optional — if missing, the installer stops after build and prints the manual registration command.
+
+### Manual
+
+```sh
+git clone git@bitbucket.org:efront_au/acf-json-mcp.git && cd acf-json-mcp
 npm install
 npm run build      # -> dist/index.js (bundled, self-contained)
 ```
 
 `dist/index.js` is a single ESM bundle with all deps inlined. Run it with plain `node`; users never need Bun, esbuild, or the source tree.
 
-### Claude Code
+## Register with Claude Code
 
-#### Automatic (recommended)
+### Automatic (recommended)
 
 ```sh
 npm run add-claude
@@ -85,7 +115,7 @@ npm run add-claude -- --project-root /Users/me/Sites/my-wp-theme
 
 Verify: `claude mcp list`. Remove: `claude mcp remove acf-json`.
 
-#### Manual
+### Manual
 
 Add to `~/.config/claude-code/config.json` (or your project's `.mcp.json`):
 

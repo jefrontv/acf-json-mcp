@@ -58,7 +58,7 @@ console.log(`  project root: ${projectRoot}`);
 console.log(`  server:       ${serverPath}`);
 console.log(`  $ claude ${cmd.join(" ")}`);
 
-const r = spawnSync("claude", cmd, { stdio: "inherit" });
+const r = spawnSync("claude", cmd, { stdio: "pipe", encoding: "utf8" });
 
 if (r.error) {
   if (r.error.code === "ENOENT") {
@@ -73,10 +73,18 @@ if (r.error) {
   throw r.error;
 }
 
+const out = (r.stdout ?? "") + (r.stderr ?? "");
 if (r.status !== 0) {
+  if (/already exists/i.test(out)) {
+    console.log("\nacf-json already registered (skipped).");
+    console.log("Remove first with:  claude mcp remove acf-json");
+    process.exit(0);
+  }
+  process.stderr.write(out);
   console.error(`\nclaude mcp add failed (exit ${r.status}).`);
   process.exit(r.status ?? 1);
 }
+process.stdout.write(out);
 
 console.log("\nDone. Verify with:  claude mcp list");
 console.log("Remove with:        claude mcp remove acf-json");

@@ -15,6 +15,7 @@
     "prebuild": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\"",
     "postinstall": "node scripts/add-claude.mjs --skip-if-missing || true",
     "add-claude": "node scripts/add-claude.mjs",
+    "install:claude": "node scripts/install.mjs",
     "test": "node tests/run-all.mjs",
     "test:smoke": "node tests/smoke.test.mjs",
     "test:mutation": "node tests/mutation.test.mjs",

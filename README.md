@@ -53,30 +53,34 @@ All tools take an optional `projectRoot` (default: the `ACF_JSON_PROJECT_ROOT` e
 
 ### One-line installer (clone + build + register with Claude Code)
 
+Private Bitbucket repo → use SSH clone, not `npx <raw-url>` (raw URLs return 404 to unauthenticated fetches):
+
 ```sh
-npx --yes https://bitbucket.org/efront_au/acf-json-mcp/raw/master/scripts/install.mjs
+git clone git@bitbucket.org:efront_au/acf-json-mcp.git && cd acf-json-mcp && npm run install:claude
 ```
 
-Or, if you've already cloned the repo:
+What it does:
+1. Clones the repo (you're already in it after clone).
+2. `npm install --ignore-scripts` (skips the `postinstall` hook so it doesn't pre-register with the wrong project root).
+3. `npm run build` → `dist/index.js`.
+4. Registers with Claude Code via `claude mcp add` (default scope: `user`, project root = cwd).
 
+Run from inside an existing clone:
 ```sh
 npm run install:claude
 ```
 
-What it does:
-1. Clones `efront_au/acf-json-mcp` into `~/Documents/Sites/acf-json-mcp` (or `--dest <path>`). Skips if already present.
-2. `npm install` (skips the postinstall hook so it doesn't pre-register with the wrong project root).
-3. `npm run build` → `dist/index.js`.
-4. Registers with Claude Code via `claude mcp add` (default scope: `user`).
-
-Flags:
-- `--dest <path>` — clone destination (default: `~/Documents/Sites/acf-json-mcp`).
+Flags (pass after `--`):
+- `--dest <path>` — clone destination (default: detected from cwd when run inside a checkout, else `~/Documents/Sites/acf-json-mcp`).
 - `--project-root <path>` — WP project root passed to the server (default: `ACF_JSON_PROJECT_ROOT` env or cwd).
 - `--scope <local|user|project>` — Claude Code scope (default: `user`).
 
 ```sh
-# clone elsewhere + pin to a WP project
-npx --yes https://bitbucket.org/efront_au/acf-json-mcp/raw/master/scripts/install.mjs --dest ~/src/acf-json-mcp --project-root ~/Sites/my-theme
+# pin to a specific WP project
+npm run install:claude -- --project-root ~/Sites/my-wp-theme
+
+# register for current project only
+npm run install:claude -- --scope local
 ```
 
 Idempotent: re-running skips the clone, rebuilds, and treats "already registered" as success. The `claude` CLI is optional — if missing, the installer stops after build and prints the manual registration command.

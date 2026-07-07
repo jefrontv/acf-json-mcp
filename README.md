@@ -228,4 +228,4 @@ The engine + sync logic are ported verbatim from the [oh-my-pi](https://github.c
 - **`clone`**: a `clone` field's `clone` array references `group_`/`field_` keys elsewhere in the index.
 - **`acfe_autosync`** (ACF Extended): should contain `"json"` for local JSON sync to fire automatically.
 - **Sync**: `wp acf json sync` is the ACF PRO WP-CLI command. `wp acf json status` is the read-only probe. `--dry-run` + `--key=<key>` flags supported.
-- **`modified`**: group-level Unix epoch seconds. Every mutating tool bumps it on write so ACF/admin sees the change.
+- **`modified`**: group-level Unix epoch seconds. Every mutating tool bumps it on write so ACF/admin sees the change.// test update marker

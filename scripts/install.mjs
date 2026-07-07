@@ -19,15 +19,19 @@
 // (warns + skips registration if missing).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = "git@bitbucket.org:efront_au/acf-json-mcp.git";
 const DEFAULT_DEST = resolve(process.env.HOME ?? "", "Documents/Sites/acf-json-mcp");
+// If this script is being run from inside a checkout (scripts/install.mjs
+// resolves under cwd), operate on that checkout rather than the default dest.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const IN_REPO = existsSync(resolve(process.cwd(), "package.json")) && existsSync(resolve(process.cwd(), "scripts", "install.mjs"));
 
 const args = process.argv.slice(2);
-let dest = DEFAULT_DEST;
+let dest = IN_REPO ? process.cwd() : DEFAULT_DEST;
 let projectRoot = process.env.ACF_JSON_PROJECT_ROOT ?? process.cwd();
 let scope = "user";
 

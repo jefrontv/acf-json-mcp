@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-const tests = ["smoke.test.mjs", "mutation.test.mjs", "write.test.mjs"];
+const tests = ["smoke.test.mjs", "mutation.test.mjs", "write.test.mjs", "guards.test.mjs"];
 let failed = 0;
 
 for (const t of tests) {

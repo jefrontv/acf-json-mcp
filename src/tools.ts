@@ -54,6 +54,7 @@ import {
   findFieldByKey,
   findLayoutOwner,
   resolveProjectRoot,
+  resolveOneGroup,
 } from "./helpers.ts";
 
 type TextResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -72,9 +73,14 @@ async function guard(fn: () => Promise<TextResult> | TextResult): Promise<TextRe
   }
 }
 
-// Per-call cwd: MCP clients pass the project root via env. Fallback to cwd.
+// Per-call cwd fallback (when no explicit projectRoot arg is passed). Order:
+//   ACF_JSON_PROJECT_ROOT  — explicit pin set at registration time.
+//   CLAUDE_PROJECT_DIR     — injected by Claude Code = the active project root,
+//                            so one user-scope install auto-targets whatever WP
+//                            project the session is in (no per-project pinning).
+// Falls through to process.cwd() in resolveProjectRoot when neither is set.
 function ctxCwd(): { cwd?: string } {
-  const env = process.env.ACF_JSON_PROJECT_ROOT;
+  const env = process.env.ACF_JSON_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR;
   return env && env.length > 0 ? { cwd: env } : {};
 }
 
@@ -189,8 +195,9 @@ export function registerTools(server: McpServer): void {
     async ({ groupKey, parent, field, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const built = buildField(field.type, field.name, field.label, field.overrides ?? {}, idx.allKeys);
       if (built.errors.length > 0) return fail(built.errors.join("; "));
       const raw = JSON.parse(JSON.stringify(g)) as Record<string, unknown>;
@@ -249,6 +256,10 @@ export function registerTools(server: McpServer): void {
     async ({ from, to, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
+      for (const gk of new Set([from.groupKey, to.groupKey])) {
+        const gr = resolveOneGroup(idx, gk);
+        if ("error" in gr) return fail(gr.error);
+      }
       const result = planMove(idx, { from, to });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug as unknown as Record<string, unknown> }));
@@ -279,8 +290,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = cloneLayout(idx, groupKey, layoutKey, newName, newLabel);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Cloned layout ${layoutKey} -> ${result.newLayoutKey} (${newName}) in ${groupKey}.`;
@@ -329,8 +341,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = removeField(idx, groupKey, fieldKey, { scrubClones: scrubClones === true });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const entries = [{ file: g._file, group: result.updatedGroup as unknown as Record<string, unknown> }];
       for (const sg of result.scrubbedGroups) entries.push({ file: sg._file, group: sg as unknown as Record<string, unknown> });
       let summary = `Removed field ${fieldKey} from ${groupKey} at ${g._file}.`;
@@ -362,8 +375,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = reorderField(idx, groupKey, fieldKey, toIndex);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Reordered field ${fieldKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
@@ -415,8 +429,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = updateField(idx, groupKey, fieldKey, patch);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Updated field ${fieldKey} in ${groupKey} (${Object.keys(patch).join(", ")}).`;
@@ -444,8 +459,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = addLayout(idx, groupKey, flexFieldKey, name, label, display ?? "block");
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Added layout ${result.newLayoutKey} (${name}) to ${flexFieldKey} in ${groupKey}.`;
@@ -470,8 +486,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = removeLayout(idx, groupKey, layoutKey);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Removed layout ${layoutKey} from ${groupKey}.`;
@@ -497,8 +514,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = reorderLayout(idx, groupKey, layoutKey, toIndex);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Reordered layout ${layoutKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
@@ -525,8 +543,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = renameLayout(idx, groupKey, layoutKey, newName ?? "", newLabel ?? "");
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Renamed layout ${layoutKey} in ${groupKey}.`;
@@ -582,8 +601,9 @@ export function registerTools(server: McpServer): void {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const dr = dryRun === true;
       const idx = getIndex(root);
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const summary = `${dr ? "Would delete" : "Deleted"} group ${groupKey} (${g._file}).`;
       if (dr) return ok("DRY RUN — no files written.\n" + summary, { dryRun: true, groupKey, file: g._file });
       unlinkSync(g._file);
@@ -611,8 +631,9 @@ export function registerTools(server: McpServer): void {
       const idx = getIndex(root);
       const result = updateGroupSettings(idx, groupKey, patch);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const summary = `Updated group settings on ${groupKey} (${Object.keys(patch).join(", ")}).`;
       const r = commit([{ file: g._file, group: result.updatedGroup as unknown as Record<string, unknown> }], dr, summary, { groupKey });
       return ok(r.content[0]?.text ?? summary, r.details);

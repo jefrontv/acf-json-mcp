@@ -13,6 +13,7 @@ import { resolve, join, sep, basename } from "node:path";
 import {
   loadIndex,
   type LoadedIndex,
+  type AcfGroup,
   type Finding,
   type ReferenceEdge,
 } from "./engine.ts";
@@ -255,6 +256,29 @@ export function findLayoutOwnerNested(node: unknown, layoutKey: string): Record<
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// resolveOneGroup — resolve EXACTLY one group by key for a mutation. The index
+// merges every acf-json dir found under the project root, so the same group_
+// key can legitimately appear in more than one file (a theme + its backup copy,
+// a child theme, a plugin bundle). Silently writing to the first match leaves
+// the other copies stale — a data-loss trap. A mutation targeting an ambiguous
+// key is refused; the caller narrows projectRoot (or removes the duplicate).
+// ---------------------------------------------------------------------------
+
+export function resolveOneGroup(idx: LoadedIndex, groupKey: string): { group: AcfGroup } | { error: string } {
+  const matches = idx.groups.filter((g) => g.key === groupKey);
+  if (matches.length === 0) return { error: `group ${groupKey} not found` };
+  if (matches.length > 1) {
+    return {
+      error:
+        `group ${groupKey} is ambiguous — the same key exists in ${matches.length} files:\n  ` +
+        matches.map((m) => m._file).join("\n  ") +
+        `\nPass an explicit projectRoot that points at a single acf-json dir, or remove the duplicate copy before mutating.`,
+    };
+  }
+  return { group: matches[0]! };
 }
 
 // ---------------------------------------------------------------------------

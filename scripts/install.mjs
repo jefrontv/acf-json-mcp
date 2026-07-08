@@ -32,12 +32,13 @@ const IN_REPO = existsSync(resolve(process.cwd(), "package.json")) && existsSync
 
 const args = process.argv.slice(2);
 let dest = IN_REPO ? process.cwd() : DEFAULT_DEST;
-let projectRoot = process.env.ACF_JSON_PROJECT_ROOT ?? process.cwd();
+let projectRoot = process.env.ACF_JSON_PROJECT_ROOT ?? "";
+let pinRoot = typeof process.env.ACF_JSON_PROJECT_ROOT === "string" && process.env.ACF_JSON_PROJECT_ROOT.length > 0;
 let scope = "user";
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--dest" && args[i + 1]) dest = resolve(args[++i]);
-  else if (args[i] === "--project-root" && args[i + 1]) projectRoot = resolve(args[++i]);
+  else if (args[i] === "--project-root" && args[i + 1]) { projectRoot = resolve(args[++i]); pinRoot = true; }
   else if (args[i] === "--scope" && args[i + 1]) scope = args[++i];
   else if (args[i] === "--user") scope = "user";
   else if (args[i] === "--local") scope = "local";
@@ -95,9 +96,11 @@ if (!has("claude")) {
 }
 
 const serverPath = resolve(dest, "dist/index.js");
-const cmd = ["mcp", "add", "acf-json", "--scope", scope, "--env", `ACF_JSON_PROJECT_ROOT=${projectRoot}`, "--", "node", serverPath];
+const cmd = ["mcp", "add", "acf-json", "--scope", scope];
+if (pinRoot) cmd.push("--env", `ACF_JSON_PROJECT_ROOT=${projectRoot}`);
+cmd.push("--", "node", serverPath);
 console.log(`     scope:         ${scope}`);
-console.log(`     project root:  ${projectRoot}`);
+console.log(`     project root:  ${pinRoot ? projectRoot : "(follows CLAUDE_PROJECT_DIR / per-call projectRoot)"}`);
 console.log(`     $ claude ${cmd.join(" ")}`);
 const r = spawnSync("claude", cmd, { stdio: "pipe", encoding: "utf8" });
 const stdout = (r.stdout ?? "") + (r.stderr ?? "");

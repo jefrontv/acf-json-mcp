@@ -22626,7 +22626,7 @@ function findWpRoot(acfJsonDir) {
   }
   return null;
 }
-var WP_CANDIDATES = ["wp", "/opt/homebrew/bin/wp", join2(homedir(), ".local/bin/wp")];
+var WP_CANDIDATES = ["wp", "/opt/homebrew/bin/wp", "/usr/local/bin/wp", join2(homedir(), ".local/bin/wp")];
 function isExecutableBin(p) {
   try {
     const st = existsSync(p);
@@ -22991,6 +22991,18 @@ function findLayoutOwnerNested(node, layoutKey) {
   }
   return null;
 }
+function resolveOneGroup(idx, groupKey) {
+  const matches = idx.groups.filter((g) => g.key === groupKey);
+  if (matches.length === 0) return { error: `group ${groupKey} not found` };
+  if (matches.length > 1) {
+    return {
+      error: `group ${groupKey} is ambiguous \u2014 the same key exists in ${matches.length} files:
+  ` + matches.map((m) => m._file).join("\n  ") + `
+Pass an explicit projectRoot that points at a single acf-json dir, or remove the duplicate copy before mutating.`
+    };
+  }
+  return { group: matches[0] };
+}
 function resolveProjectRoot(params, ctx) {
   if (typeof params.projectRoot === "string" && params.projectRoot.length > 0) return resolve3(params.projectRoot);
   if (ctx?.cwd) return resolve3(ctx.cwd);
@@ -23012,7 +23024,7 @@ async function guard(fn) {
   }
 }
 function ctxCwd() {
-  const env = process.env.ACF_JSON_PROJECT_ROOT;
+  const env = process.env.ACF_JSON_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR;
   return env && env.length > 0 ? { cwd: env } : {};
 }
 function registerTools(server2) {
@@ -23110,8 +23122,9 @@ function registerTools(server2) {
     async ({ groupKey, parent, field, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const built = buildField(field.type, field.name, field.label, field.overrides ?? {}, idx.allKeys);
       if (built.errors.length > 0) return fail(built.errors.join("; "));
       const raw = JSON.parse(JSON.stringify(g));
@@ -23165,6 +23178,10 @@ function registerTools(server2) {
     async ({ from, to, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
+      for (const gk of /* @__PURE__ */ new Set([from.groupKey, to.groupKey])) {
+        const gr = resolveOneGroup(idx, gk);
+        if ("error" in gr) return fail(gr.error);
+      }
       const result = planMove(idx, { from, to });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug }));
@@ -23192,8 +23209,9 @@ function registerTools(server2) {
       const idx = getIndex(root);
       const result = cloneLayout(idx, groupKey, layoutKey, newName, newLabel);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Cloned layout ${layoutKey} -> ${result.newLayoutKey} (${newName}) in ${groupKey}.`;
@@ -23236,8 +23254,9 @@ function registerTools(server2) {
       const idx = getIndex(root);
       const result = removeField(idx, groupKey, fieldKey, { scrubClones: scrubClones === true });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const entries = [{ file: g._file, group: result.updatedGroup }];
       for (const sg of result.scrubbedGroups) entries.push({ file: sg._file, group: sg });
       let summary = `Removed field ${fieldKey} from ${groupKey} at ${g._file}.`;
@@ -23268,8 +23287,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = reorderField(idx, groupKey, fieldKey, toIndex);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Reordered field ${fieldKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
@@ -23317,8 +23337,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = updateField(idx, groupKey, fieldKey, patch);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Updated field ${fieldKey} in ${groupKey} (${Object.keys(patch).join(", ")}).`;
@@ -23343,8 +23364,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = addLayout(idx, groupKey, flexFieldKey, name, label, display ?? "block");
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Added layout ${result.newLayoutKey} (${name}) to ${flexFieldKey} in ${groupKey}.`;
@@ -23366,8 +23388,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = removeLayout(idx, groupKey, layoutKey);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Removed layout ${layoutKey} from ${groupKey}.`;
@@ -23390,8 +23413,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = reorderLayout(idx, groupKey, layoutKey, toIndex);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Reordered layout ${layoutKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
@@ -23415,8 +23439,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = renameLayout(idx, groupKey, layoutKey, newName ?? "", newLabel ?? "");
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       writeGroupFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Renamed layout ${layoutKey} in ${groupKey}.`;
@@ -23466,8 +23491,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const dr = dryRun === true;
       const idx = getIndex(root);
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const summary = `${dr ? "Would delete" : "Deleted"} group ${groupKey} (${g._file}).`;
       if (dr) return ok("DRY RUN \u2014 no files written.\n" + summary, { dryRun: true, groupKey, file: g._file });
       unlinkSync2(g._file);
@@ -23492,8 +23518,9 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const idx = getIndex(root);
       const result = updateGroupSettings(idx, groupKey, patch);
       if (result.errors.length > 0) return fail(result.errors.join("; "));
-      const g = idx.groups.find((x) => x.key === groupKey);
-      if (!g) return fail(`group ${groupKey} not found`);
+      const gr = resolveOneGroup(idx, groupKey);
+      if ("error" in gr) return fail(gr.error);
+      const g = gr.group;
       const summary = `Updated group settings on ${groupKey} (${Object.keys(patch).join(", ")}).`;
       const r = commit([{ file: g._file, group: result.updatedGroup }], dr, summary, { groupKey });
       return ok(r.content[0]?.text ?? summary, r.details);

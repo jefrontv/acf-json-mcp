@@ -24,13 +24,19 @@ const serverPath = resolve(__dirname, "..", "dist", "index.js");
 
 // Parse argv: --project-root <path>, --scope <local|user|project>
 const args = process.argv.slice(2);
-let projectRoot = process.env.ACF_JSON_PROJECT_ROOT ?? process.cwd();
+// A pinned project root is baked into the registration as ACF_JSON_PROJECT_ROOT.
+// When NOT pinned, we omit the env entirely and let the server follow
+// CLAUDE_PROJECT_DIR (which Claude Code injects = the active project root), so a
+// single user-scope install auto-targets whatever WP project the session is in.
+let projectRoot = process.env.ACF_JSON_PROJECT_ROOT ?? "";
+let pinRoot = typeof process.env.ACF_JSON_PROJECT_ROOT === "string" && process.env.ACF_JSON_PROJECT_ROOT.length > 0;
 let scope = "user";
 let skipIfMissing = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--project-root" && args[i + 1]) {
     projectRoot = resolve(args[++i]);
+    pinRoot = true;
   } else if (args[i] === "--scope" && args[i + 1]) {
     scope = args[++i];
   } else if (args[i] === "--user") {
@@ -50,11 +56,13 @@ if (!existsSync(serverPath)) {
 //   claude mcp add <name> [--scope <s>] [--env KEY=VAL] -- <command> [args...]
 const cmd = ["mcp", "add", "acf-json"];
 if (scope) cmd.push("--scope", scope);
-cmd.push("--env", `ACF_JSON_PROJECT_ROOT=${projectRoot}`);
+// Only pin ACF_JSON_PROJECT_ROOT when explicitly requested; otherwise the
+// server resolves the root from CLAUDE_PROJECT_DIR (or a per-call projectRoot).
+if (pinRoot) cmd.push("--env", `ACF_JSON_PROJECT_ROOT=${projectRoot}`);
 cmd.push("--", "node", serverPath);
 
 console.log(`Registering acf-json MCP server (scope=${scope})...`);
-console.log(`  project root: ${projectRoot}`);
+console.log(`  project root: ${pinRoot ? projectRoot : "(follows CLAUDE_PROJECT_DIR / per-call projectRoot)"}`);
 console.log(`  server:       ${serverPath}`);
 console.log(`  $ claude ${cmd.join(" ")}`);
 

@@ -67,7 +67,7 @@ export function findWpRoot(acfJsonDir: string): string | null {
 // Returns the path that exists + is executable, or null.
 // ---------------------------------------------------------------------------
 
-const WP_CANDIDATES = ["wp", "/opt/homebrew/bin/wp", join(homedir(), ".local/bin/wp")];
+const WP_CANDIDATES = ["wp", "/opt/homebrew/bin/wp", "/usr/local/bin/wp", join(homedir(), ".local/bin/wp")];
 
 function isExecutableBin(p: string): boolean {
   try {

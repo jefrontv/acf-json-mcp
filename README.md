@@ -61,9 +61,9 @@ git clone git@bitbucket.org:efront_au/acf-json-mcp.git && cd acf-json-mcp && npm
 
 What it does:
 1. Clones the repo (you're already in it after clone).
-2. `npm install --ignore-scripts` (skips the `postinstall` hook so it doesn't pre-register with the wrong project root).
+2. `npm install --ignore-scripts` (installs deps; registration is an explicit step, never a hidden `postinstall`).
 3. `npm run build` → `dist/index.js`.
-4. Registers with Claude Code via `claude mcp add` (default scope: `user`, project root = cwd).
+4. Registers with Claude Code via `claude mcp add` (default scope: `user`). The project root is **not** pinned unless you pass `--project-root` — otherwise the server follows `CLAUDE_PROJECT_DIR` (the active project, injected by Claude Code) at call time, so one install serves every WP project.
 
 Run from inside an existing clone:
 ```sh
@@ -107,6 +107,8 @@ npm run build      # -> dist/index.js (bundled, self-contained)
 
 `dist/index.js` is a single ESM bundle with all deps inlined. Run it with plain `node`; users never need Bun, esbuild, or the source tree.
 
+> **Note:** `npm install` installs dependencies only — it does **not** register the server with any client (there is no `postinstall` hook). Registration is always an explicit `npm run add-claude` / `npm run install:claude` step.
+
 ## Register with Claude Code
 
 ### Automatic (recommended)
@@ -115,7 +117,7 @@ npm run build      # -> dist/index.js (bundled, self-contained)
 npm run add-claude
 ```
 
-Resolves `dist/index.js`, detects the project root (`ACF_JSON_PROJECT_ROOT` env or cwd), and runs `claude mcp add` for you. Flags:
+Resolves `dist/index.js` and runs `claude mcp add` for you. By default it does **not** pin a project root — the server resolves it per call from an explicit `projectRoot` arg, the `ACF_JSON_PROJECT_ROOT` env, or `CLAUDE_PROJECT_DIR` (injected by Claude Code = the active project). So one `user`-scope install works across every WP project. Flags:
 
 - `--project-root /abs/path` — override the WP project root
 - `--scope local` — current project only (default: `user` = all projects)
@@ -223,10 +225,13 @@ npm run typecheck                 # tsc --noEmit (strict)
 Each tool call resolves the project root in this order:
 
 1. The `projectRoot` argument passed to the tool (if provided).
-2. The `ACF_JSON_PROJECT_ROOT` env var (set per-client).
-3. The server's `process.cwd()`.
+2. The `ACF_JSON_PROJECT_ROOT` env var (pin a single project at registration time).
+3. `CLAUDE_PROJECT_DIR` — injected by Claude Code = the directory the session runs in, so an **unpinned** user-scope install auto-targets the active WP project.
+4. The server's `process.cwd()` (last resort; unreliable for stdio MCP servers per the Claude Code docs, so prefer the above).
 
-This lets one server serve multiple projects (pass `projectRoot` per call), or pin a single project via env.
+This lets one server serve every project (unpinned → follows `CLAUDE_PROJECT_DIR`), accept a per-call `projectRoot` override, or pin one project via env.
+
+**Ambiguous keys are refused.** When the resolved root contains more than one `acf-json/` dir (a theme + a backup copy, a child theme, a plugin bundle) and the same `group_` key appears in more than one of them, mutating tools **fail** with an "ambiguous key" error listing the files — rather than silently editing one copy and leaving the others stale. Narrow `projectRoot` to a single theme, or remove the duplicate.
 
 ## Provenance
 

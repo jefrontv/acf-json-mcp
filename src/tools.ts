@@ -1,5 +1,6 @@
-// acf-json MCP tool registrations — 22 tools, one-to-one port of the oh-my-pi
-// acf-json extension's tool handlers onto the MCP `server.registerTool` API.
+// acf-json MCP tool registrations — 28 tools: the 22 field-group tools ported
+// from the oh-my-pi acf-json extension, plus 6 for ACF's UI objects (post
+// types, taxonomies, options pages), on the MCP `server.registerTool` API.
 //
 // Differences from the OMP extension:
 //   - No `tool_call` guard. An MCP server has no write/edit interception surface;
@@ -8,9 +9,6 @@
 //   - `ctx.cwd` comes from the `ACF_JSON_PROJECT_ROOT` env var (set per-client)
 //     or `process.cwd()`, not a session context object.
 //   - Result shape is the MCP `{ content: [{ type: "text", text }], isError? }`.
-//
-// engine.ts and sync.ts are reused verbatim — the same pure logic the OMP
-// extension ships.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -24,12 +22,17 @@ import {
   planMove,
   cloneLayout,
   validate,
+  validateUiObjects,
   references,
   buildField,
+  buildPostType,
+  buildTaxonomy,
+  buildOptionsPage,
   removeField,
   reorderField,
   repairGroup,
   updateField,
+  updateUiObject,
   addLayout,
   removeLayout,
   reorderLayout,
@@ -38,7 +41,12 @@ import {
   updateGroupSettings,
   renameField,
   outline,
+  outlineUiObjects,
+  uiKindOf,
   type KeyPrefix,
+  type UiKind,
+  type UiBuildResult,
+  type LoadedIndex,
 } from "./engine.ts";
 import { runSync } from "./sync.ts";
 import {
@@ -47,14 +55,15 @@ import {
   formatFindings,
   formatEdges,
   formatSyncResult,
-  writeGroupFile,
-  writeGroupFilesAtomic,
+  writeAcfFile,
+  writeAcfFilesAtomic,
   commit,
   isRecord,
   findFieldByKey,
   findLayoutOwner,
   resolveProjectRoot,
   resolveOneGroup,
+  resolveOneUiObject,
 } from "./helpers.ts";
 
 type TextResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -139,7 +148,7 @@ export function registerTools(server: McpServer): void {
     "acf_validate",
     {
       description:
-        "Validate ACF field group JSON structure: required keys, key format, collisions, parent_repeater/clone/conditional_logic resolution, layouts dict. Severity-tagged findings.",
+        "Validate ACF JSON: field group structure (required keys, key format, collisions, parent_repeater/clone/conditional_logic resolution, layouts dict) AND post type / taxonomy / options page objects (slug rules, reserved terms, duplicate menu_slug, object_type references). Pass a group_/post_type_/taxonomy_/ui_options_page_ key to scope it. Severity-tagged findings.",
       inputSchema: {
         groupKey: z.string().optional(),
         projectRoot: z.string().optional(),
@@ -148,7 +157,12 @@ export function registerTools(server: McpServer): void {
     async ({ groupKey, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
-      const findings = validate(idx, groupKey);
+      // A UI-object key scopes to UI objects only; a group key (or no key at
+      // all) validates groups, and an unscoped run covers both halves.
+      const uiScoped = typeof groupKey === "string" && uiKindOf(groupKey) !== null;
+      const findings = uiScoped
+        ? validateUiObjects(idx, groupKey)
+        : [...validate(idx, groupKey), ...(groupKey ? [] : validateUiObjects(idx))];
       const errorCount = findings.filter((f) => f.severity === "error").length;
       const warningCount = findings.filter((f) => f.severity === "warning").length;
       const infoCount = findings.filter((f) => f.severity === "info").length;
@@ -230,7 +244,7 @@ export function registerTools(server: McpServer): void {
       }
 
       const file = g._file;
-      writeGroupFile(file, raw);
+      writeAcfFile(file, raw);
       invalidateIndex();
       const fieldKey = typeof newField["key"] === "string" ? newField["key"] : "";
       const summary = `Added field ${fieldKey} (${field.name}) to ${groupKey} at ${file}. Validate? run acf_validate.`;
@@ -263,7 +277,7 @@ export function registerTools(server: McpServer): void {
       const result = planMove(idx, { from, to });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug as unknown as Record<string, unknown> }));
-      writeGroupFilesAtomic(entries);
+      writeAcfFilesAtomic(entries);
       const writtenFiles = entries.map((e) => e.file);
       invalidateIndex();
       const summary = `Moved field ${from.fieldKey} from ${from.groupKey} to ${to.groupKey}.`;
@@ -293,7 +307,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Cloned layout ${layoutKey} -> ${result.newLayoutKey} (${newName}) in ${groupKey}.`;
       return ok(summary, { newLayoutKey: result.newLayoutKey, groupKey, file: g._file });
@@ -378,7 +392,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Reordered field ${fieldKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
       return ok(summary, { fieldKey, fromIndex: result.fromIndex, toIndex: result.toIndex, file: g._file });
@@ -403,7 +417,7 @@ export function registerTools(server: McpServer): void {
       if (result.errors.length > 0) return fail(result.errors.join("; "));
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug as unknown as Record<string, unknown> }));
       const writtenFiles = entries.map((e) => e.file);
-      if (entries.length > 0) { writeGroupFilesAtomic(entries); invalidateIndex(); }
+      if (entries.length > 0) { writeAcfFilesAtomic(entries); invalidateIndex(); }
       const summary = result.changes.length > 0
         ? `Repaired ${writtenFiles.length} group(s):\n` + result.changes.map((c) => "  " + c).join("\n")
         : "No dangling back-refs found; nothing to repair.";
@@ -432,7 +446,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Updated field ${fieldKey} in ${groupKey} (${Object.keys(patch).join(", ")}).`;
       return ok(summary, { fieldKey, groupKey, file: g._file });
@@ -462,7 +476,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Added layout ${result.newLayoutKey} (${name}) to ${flexFieldKey} in ${groupKey}.`;
       return ok(summary, { newLayoutKey: result.newLayoutKey, groupKey, file: g._file });
@@ -489,7 +503,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Removed layout ${layoutKey} from ${groupKey}.`;
       return ok(summary, { layoutKey, groupKey, file: g._file });
@@ -517,7 +531,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Reordered layout ${layoutKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
       return ok(summary, { layoutKey, fromIndex: result.fromIndex, toIndex: result.toIndex, file: g._file });
@@ -546,7 +560,7 @@ export function registerTools(server: McpServer): void {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
+      writeAcfFile(g._file, result.updatedGroup as unknown as Record<string, unknown>);
       invalidateIndex();
       const summary = `Renamed layout ${layoutKey} in ${groupKey}.`;
       return ok(summary, { layoutKey, groupKey, file: g._file });
@@ -708,4 +722,190 @@ export function registerTools(server: McpServer): void {
       return ok(lines.length > 0 ? lines.join("\n") : "No groups found.", { groupCount: idx.groups.length });
     }),
   );
+
+  // --- Tool 23: acf_list_ui_objects -------------------------------------------
+  server.registerTool(
+    "acf_list_ui_objects",
+    {
+      description:
+        "List the ACF post types (post_type_*.json), taxonomies (taxonomy_*.json) and options pages (ui_options_page_*.json) defined in this project: kind, key, title, slug, active flag, file. Optionally filter by kind.",
+      inputSchema: {
+        kind: z.enum(["post_type", "taxonomy", "options_page"]).optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async ({ kind, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const text = outlineUiObjects(idx, kind as UiKind | undefined);
+      const counted = kind ? idx.uiObjects.filter((o) => o._kind === kind) : idx.uiObjects;
+      return ok(text.length > 0 ? text : "No ACF post types, taxonomies or options pages found.", { count: counted.length });
+    }),
+  );
+
+  // --- Tool 24: acf_create_post_type ------------------------------------------
+  server.registerTool(
+    "acf_create_post_type",
+    {
+      description:
+        "Create an ACF post type (post_type_<key>.json) with ACF 6.x defaults and the full auto-generated label set. Pass singular + plural for correct labels (they default to title, which is only right for words like \"News\"). Enforces ACF's key rules: max 20 chars, [a-z0-9_-], not a WordPress reserved term, not already used. dryRun previews. Run acf_sync afterwards to register it in the database.",
+      inputSchema: {
+        title: z.string(),
+        postType: z.string(),
+        singular: z.string().optional(),
+        plural: z.string().optional(),
+        description: z.string().optional(),
+        supports: z.array(z.string()).optional(),
+        taxonomies: z.array(z.string()).optional(),
+        hierarchical: z.boolean().optional(),
+        isPublic: z.boolean().optional(),
+        showInRest: z.boolean().optional(),
+        hasArchive: z.boolean().optional(),
+        archiveSlug: z.string().optional(),
+        rewriteSlug: z.string().optional(),
+        menuIcon: z.string().optional(),
+        menuPosition: z.number().int().optional(),
+        labels: z.record(z.string(), z.string()).optional(),
+        active: z.boolean().optional(),
+        menuOrder: z.number().int().optional(),
+        overrides: z.record(z.string(), z.unknown()).optional(),
+        dryRun: z.boolean().optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildPostType(idx, args), `post type "${args.postType}"`)),
+  );
+
+  // --- Tool 25: acf_create_taxonomy -------------------------------------------
+  server.registerTool(
+    "acf_create_taxonomy",
+    {
+      description:
+        "Create an ACF taxonomy (taxonomy_<key>.json) attached to one or more post types, with ACF 6.x defaults and the auto-generated label set for its hierarchy style (hierarchical = category-like, otherwise tag-like). Enforces ACF's key rules: max 32 chars, [a-z0-9_-], not a WordPress reserved term, not already used. dryRun previews. Run acf_sync afterwards to register it in the database.",
+      inputSchema: {
+        title: z.string(),
+        taxonomy: z.string(),
+        objectType: z.array(z.string()),
+        singular: z.string().optional(),
+        plural: z.string().optional(),
+        description: z.string().optional(),
+        hierarchical: z.boolean().optional(),
+        isPublic: z.boolean().optional(),
+        showInRest: z.boolean().optional(),
+        showAdminColumn: z.boolean().optional(),
+        rewriteSlug: z.string().optional(),
+        labels: z.record(z.string(), z.string()).optional(),
+        active: z.boolean().optional(),
+        menuOrder: z.number().int().optional(),
+        overrides: z.record(z.string(), z.unknown()).optional(),
+        dryRun: z.boolean().optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildTaxonomy(idx, args), `taxonomy "${args.taxonomy}"`)),
+  );
+
+  // --- Tool 26: acf_create_options_page ---------------------------------------
+  server.registerTool(
+    "acf_create_options_page",
+    {
+      description:
+        "Create an ACF options page (ui_options_page_<key>.json). menu_slug defaults to a slug of the title and is what a field group's options_page location rule must reference. Set parentSlug for a sub-page (e.g. \"edit.php?post_type=cpt_resource\" or another options page's menu_slug); leave it empty for a top-level admin menu item. dryRun previews. Run acf_sync afterwards to register it in the database.",
+      inputSchema: {
+        title: z.string(),
+        menuSlug: z.string().optional(),
+        pageTitle: z.string().optional(),
+        menuTitle: z.string().optional(),
+        parentSlug: z.string().optional(),
+        capability: z.string().optional(),
+        position: z.string().optional(),
+        iconUrl: z.string().optional(),
+        redirect: z.boolean().optional(),
+        description: z.string().optional(),
+        dataStorage: z.enum(["options", "post_id"]).optional(),
+        postId: z.string().optional(),
+        autoload: z.boolean().optional(),
+        updateButton: z.string().optional(),
+        updatedMessage: z.string().optional(),
+        active: z.boolean().optional(),
+        menuOrder: z.number().int().optional(),
+        overrides: z.record(z.string(), z.unknown()).optional(),
+        dryRun: z.boolean().optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildOptionsPage(idx, args), `options page "${args.title}"`)),
+  );
+
+  // --- Tool 27: acf_update_ui_object ------------------------------------------
+  server.registerTool(
+    "acf_update_ui_object",
+    {
+      description:
+        "Edit an existing post type / taxonomy / options page IN PLACE by key (labels, supports, rewrite, object_type, menu_slug, capability, active, …). The key is preserved so the ACF database row and any location rules keep resolving. Objects deep-merge; arrays and scalars replace. Refuses key changes. dryRun previews.",
+      inputSchema: {
+        key: z.string(),
+        patch: z.record(z.string(), z.unknown()),
+        dryRun: z.boolean().optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async ({ key, patch, dryRun, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const resolved = resolveOneUiObject(idx, key);
+      if ("error" in resolved) return fail(resolved.error);
+      const result = updateUiObject(idx, key, patch);
+      if (result.errors.length > 0) return fail(result.errors.join("; "));
+      const file = resolved.object._file;
+      const summary = `Updated ${resolved.object._kind} ${key} (${Object.keys(patch).join(", ")}).`;
+      const r = commit([{ file, group: result.updated as unknown as Record<string, unknown> }], dryRun === true, summary, { key, kind: resolved.object._kind });
+      return ok(r.content[0]?.text ?? summary, r.details);
+    }),
+  );
+
+  // --- Tool 28: acf_delete_ui_object ------------------------------------------
+  server.registerTool(
+    "acf_delete_ui_object",
+    {
+      description:
+        "Delete a post type / taxonomy / options page JSON file by key. dryRun previews. Field groups whose location rules target it are NOT updated — run acf_validate after. Deleting the JSON does not unregister it from the database; remove it in the ACF admin too.",
+      inputSchema: {
+        key: z.string(),
+        dryRun: z.boolean().optional(),
+        projectRoot: z.string().optional(),
+      },
+    },
+    async ({ key, dryRun, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const resolved = resolveOneUiObject(idx, key);
+      if ("error" in resolved) return fail(resolved.error);
+      const o = resolved.object;
+      const summary = `${dryRun === true ? "Would delete" : "Deleted"} ${o._kind} ${key} (${o._file}).`;
+      if (dryRun === true) return ok("DRY RUN — no files written.\n" + summary, { dryRun: true, key, kind: o._kind, file: o._file });
+      unlinkSync(o._file);
+      invalidateIndex();
+      return ok(summary, { key, kind: o._kind, file: o._file });
+    }),
+  );
+
+  // Shared create path for the three UI-object kinds: resolve the project root,
+  // build the object, write it to <acf-json>/<key>.json (ACF's own naming).
+  function createUiObject(
+    args: { dryRun?: boolean; projectRoot?: string },
+    build: (idx: LoadedIndex) => UiBuildResult,
+    label: string,
+  ): TextResult {
+    const root = resolveProjectRoot({ projectRoot: args.projectRoot }, ctxCwd());
+    const idx = getIndex(root);
+    const dirs = findAcfJsonDirs(root);
+    if (dirs.length === 0) return fail(`no acf-json directory found under ${root}`);
+    const result = build(idx);
+    if (result.errors.length > 0) return fail(result.errors.join("; "));
+    const file = join(dirs[0] ?? "", `${result.key}.json`);
+    const summary = `Created ${result.object._kind} ${result.key} — ${label} at ${file}. Run acf_sync to register it in WordPress.`;
+    const r = commit([{ file, group: result.object as unknown as Record<string, unknown> }], args.dryRun === true, summary, { key: result.key, kind: result.object._kind });
+    return ok(r.content[0]?.text ?? summary, r.details);
+  }
 }

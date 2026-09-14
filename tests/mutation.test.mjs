@@ -1,10 +1,7 @@
 // Mutation dryRun test: acf_create_group dryRun + acf_outline. No disk writes.
 // Exits 0 on success.
 
-import { resolve } from "node:path";
-import { startHarness, assert } from "./harness.mjs";
-
-const CORPUS = resolve(process.env.HOME ?? "", "Documents/Sites/efront-boilerplate-wordpress-theme");
+import { startHarness, assert, CORPUS } from "./harness.mjs";
 
 async function main() {
   const h = startHarness(CORPUS);

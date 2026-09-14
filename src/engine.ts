@@ -15,7 +15,10 @@ import { randomBytes } from "node:crypto";
 // Public types (mirror contract; snake_case kept for source-shaped keys)
 // ---------------------------------------------------------------------------
 
-export type KeyPrefix = "group" | "field" | "layout";
+// Key prefixes ACF uses for the artifacts this engine owns: field groups (and
+// their fields/layouts) plus the three "internal post type" artifacts ACF 6.1+
+// writes into acf-json/ — post types, taxonomies, and UI options pages.
+export type KeyPrefix = "group" | "field" | "layout" | "post_type" | "taxonomy" | "ui_options_page";
 
 export interface AcfField {
   key: string;
@@ -60,6 +63,23 @@ export interface AcfGroup {
   _file: string; // absolute path to source group_*.json (only synthetic key)
 }
 
+// ACF "internal post types" that live beside field groups in acf-json/:
+// post_type_*.json, taxonomy_*.json, ui_options_page_*.json (ACF 6.1 / 6.2+).
+// Their settings vary per kind, so only the four keys every one of them carries
+// are typed; the rest stay on the raw record and are read through guards.
+export type UiKind = "post_type" | "taxonomy" | "options_page";
+
+export interface AcfUiObject {
+  key: string; // "post_type_<13hex>" | "taxonomy_<13hex>" | "ui_options_page_<13hex>"
+  title: string;
+  active: boolean;
+  menu_order: number;
+  modified?: number;
+  _kind: UiKind; // synthetic
+  _file: string; // synthetic: absolute path to the source file
+  [setting: string]: unknown;
+}
+
 export interface Finding {
   severity: "error" | "warning" | "info";
   file: string;
@@ -84,8 +104,10 @@ export interface ReferenceEdge {
 
 export interface LoadedIndex {
   groups: AcfGroup[]; // one per group_*.json across all found dirs
+  uiObjects: AcfUiObject[]; // post_type_/taxonomy_/ui_options_page_ *.json
   dirToGroups: Map<string, AcfGroup[]>;
-  allKeys: Set<string>; // every group_/field_/layout_ key seen
+  dirToUiObjects: Map<string, AcfUiObject[]>;
+  allKeys: Set<string>; // every group_/field_/layout_/ui-object key seen
   errors: { file: string; error: string }[];
 }
 
@@ -275,6 +297,13 @@ export const FIELD_TEMPLATES: Record<string, { required: string[]; defaults: Rec
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "vendor", "dist", ".cache", ".next"]);
 
+// Filenames ACF writes into acf-json/. A dir holding any of them is an acf-json
+// dir — a theme that only registers post types / taxonomies / options pages via
+// ACF (no field groups yet) still has to be discoverable.
+export const GROUP_FILE_RE = /^group_.*\.json$/;
+export const UI_FILE_RE = /^(post_type|taxonomy|ui_options_page)_.*\.json$/;
+export const ACF_FILE_RE = /^(group|post_type|taxonomy|ui_options_page)_.*\.json$/;
+
 export function findAcfJsonDirs(root: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -290,18 +319,16 @@ export function findAcfJsonDirs(root: string): string[] {
     } catch {
       return;
     }
-    // If this dir is itself an acf-json dir containing group_*.json, record and stop descending.
-    const isAcfJson = basename(dir) === "acf-json";
-    if (isAcfJson) {
-      const hasGroup = entries.some((e) => /^group_.*\.json$/.test(e));
-      if (hasGroup) {
-        const norm = dir;
-        if (!seen.has(norm)) {
-          seen.add(norm);
-          out.push(norm);
-        }
-        return; // do not descend into a found acf-json dir
+    // A directory named acf-json IS an acf-json dir, even when empty: a theme
+    // that has not saved its first field group / post type yet still needs a
+    // target for create. Contents are filtered by prefix at load time, so a
+    // stray non-ACF file here is harmless.
+    if (basename(dir) === "acf-json") {
+      if (!seen.has(dir)) {
+        seen.add(dir);
+        out.push(dir);
       }
+      return; // do not descend into a found acf-json dir
     }
     for (const e of entries) {
       if (SKIP_DIRS.has(e)) continue;
@@ -344,6 +371,39 @@ function parseGroup(raw: unknown, file: string): AcfGroup | { error: string } {
   return g as unknown as AcfGroup;
 }
 
+// Key prefix ACF uses per UI-object kind. The options-page file/key prefix is
+// `ui_options_page_`, not `options_page_` — the kind name is the short form.
+export const UI_KEY_PREFIX: Record<UiKind, "post_type" | "taxonomy" | "ui_options_page"> = {
+  post_type: "post_type",
+  taxonomy: "taxonomy",
+  options_page: "ui_options_page",
+};
+
+// Map a filename (or key) to its UI kind. Order matters: `ui_options_page_`
+// must be tested before the other two so it is never mistaken for a prefix match.
+export function uiKindOf(nameOrKey: string): UiKind | null {
+  if (nameOrKey.startsWith("ui_options_page_")) return "options_page";
+  if (nameOrKey.startsWith("post_type_")) return "post_type";
+  if (nameOrKey.startsWith("taxonomy_")) return "taxonomy";
+  return null;
+}
+
+// AcfUiObject carries an index signature, so a bare union with { error } cannot
+// be narrowed by `in` — the success case is wrapped instead.
+function parseUiObject(raw: unknown, file: string, kind: UiKind): { object: AcfUiObject } | { error: string } {
+  if (!isRecord(raw)) return { error: "top-level JSON is not an object" };
+  if (!hasStringProp(raw, "key")) return { error: "missing/invalid top-level key" };
+  const o: Record<string, unknown> = { ...raw };
+  const key = typeof o["key"] === "string" ? o["key"] : "";
+  if (uiKindOf(key) !== kind) return { error: `key ${key} does not match the ${UI_KEY_PREFIX[kind]}_ prefix of its filename` };
+  if (!hasStringProp(o, "title")) o["title"] = "";
+  if (!hasBoolProp(o, "active")) o["active"] = true;
+  if (!hasNumProp(o, "menu_order")) o["menu_order"] = 0;
+  o["_kind"] = kind;
+  o["_file"] = file;
+  return { object: o as unknown as AcfUiObject };
+}
+
 function collectKeys(node: unknown, into: Set<string>): void {
   if (!isRecord(node)) return;
   if ("key" in node && typeof node["key"] === "string" && node["key"].length > 0) {
@@ -370,7 +430,9 @@ function collectKeys(node: unknown, into: Set<string>): void {
 export function loadIndex(root: string): LoadedIndex {
   const dirs = findAcfJsonDirs(root);
   const groups: AcfGroup[] = [];
+  const uiObjects: AcfUiObject[] = [];
   const dirToGroups = new Map<string, AcfGroup[]>();
+  const dirToUiObjects = new Map<string, AcfUiObject[]>();
   const allKeys = new Set<string>();
   const errors: { file: string; error: string }[] = [];
 
@@ -382,24 +444,12 @@ export function loadIndex(root: string): LoadedIndex {
       errors.push({ file: dir, error: `readdir failed: ${String(e)}` });
       continue;
     }
-    const groupFiles = entries.filter((e) => /^group_.*\.json$/.test(e)).sort();
+    const groupFiles = entries.filter((e) => GROUP_FILE_RE.test(e)).sort();
     const bucket: AcfGroup[] = [];
     for (const gf of groupFiles) {
       const file = join(dir, gf);
-      let text: string;
-      try {
-        text = readFileSync(file, "utf8");
-      } catch (e) {
-        errors.push({ file, error: `read failed: ${String(e)}` });
-        continue;
-      }
-      let raw: unknown;
-      try {
-        raw = JSON.parse(text);
-      } catch (e) {
-        errors.push({ file, error: `JSON.parse failed: ${String(e)}` });
-        continue;
-      }
+      const raw = readJson(file, errors);
+      if (raw === undefined) continue;
       const parsed = parseGroup(raw, file);
       if ("error" in parsed) {
         errors.push({ file, error: parsed.error });
@@ -409,12 +459,50 @@ export function loadIndex(root: string): LoadedIndex {
       groups.push(parsed);
     }
     if (bucket.length) dirToGroups.set(dir, bucket);
+
+    const uiFiles = entries.filter((e) => UI_FILE_RE.test(e)).sort();
+    const uiBucket: AcfUiObject[] = [];
+    for (const uf of uiFiles) {
+      const file = join(dir, uf);
+      const kind = uiKindOf(uf);
+      if (!kind) continue;
+      const raw = readJson(file, errors);
+      if (raw === undefined) continue;
+      const parsed = parseUiObject(raw, file, kind);
+      if ("error" in parsed) {
+        errors.push({ file, error: parsed.error });
+        continue;
+      }
+      uiBucket.push(parsed.object);
+      uiObjects.push(parsed.object);
+    }
+    if (uiBucket.length) dirToUiObjects.set(dir, uiBucket);
   }
 
-  // Build allKeys from every loaded group (recursive).
+  // Build allKeys from every loaded group (recursive) + every UI object key, so
+  // generateKey never mints a key that already exists in any ACF artifact.
   for (const g of groups) collectKeys(g, allKeys);
+  for (const o of uiObjects) allKeys.add(o.key);
 
-  return { groups, dirToGroups, allKeys, errors };
+  return { groups, uiObjects, dirToGroups, dirToUiObjects, allKeys, errors };
+}
+
+// Read + parse one JSON file, pushing any failure onto `errors`. Returns
+// undefined when the file could not be read or parsed.
+function readJson(file: string, errors: { file: string; error: string }[]): unknown {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    errors.push({ file, error: `read failed: ${String(e)}` });
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    errors.push({ file, error: `JSON.parse failed: ${String(e)}` });
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,4 +1649,564 @@ export function outline(index: LoadedIndex, groupKey?: string): string {
     walk(Array.isArray(g.fields) ? g.fields : [], 0);
   }
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// ACF UI objects — post types (post_type_*.json), taxonomies (taxonomy_*.json)
+// and options pages (ui_options_page_*.json).
+//
+// Defaults below are ACF 6.8's own `get_settings_array()` values
+// (includes/post-types/class-acf-post-type.php, class-acf-taxonomy.php,
+// pro/post-types/acf-ui-options-page.php). Key ORDER matches what ACF writes to
+// disk, so a file this engine creates and a file ACF re-saves diff cleanly.
+// ---------------------------------------------------------------------------
+
+// WordPress reserved terms — ACF refuses any of these as a post type or
+// taxonomy key (acf_get_wp_reserved_terms()); registering one collides with a
+// core query var and breaks the front end.
+const WP_RESERVED_TERMS: Record<string, true> = {
+  action: true, attachment: true, attachment_id: true, author: true, author_name: true,
+  calendar: true, cat: true, category: true, category__and: true, category__in: true,
+  category__not_in: true, category_name: true, comments_per_page: true, comments_popup: true,
+  custom: true, customize_messenger_channel: true, customized: true, cpage: true, day: true,
+  debug: true, embed: true, error: true, exact: true, feed: true, fields: true, hour: true,
+  link: true, link_category: true, m: true, minute: true, monthnum: true, more: true,
+  name: true, nav_menu: true, nonce: true, nopaging: true, offset: true, order: true,
+  orderby: true, p: true, page: true, page_id: true, paged: true, pagename: true, pb: true,
+  perm: true, post: true, post__in: true, post__not_in: true, post_format: true,
+  post_mime_type: true, post_status: true, post_tag: true, post_type: true, posts: true,
+  posts_per_archive_page: true, posts_per_page: true, preview: true, robots: true, s: true,
+  search: true, second: true, sentence: true, showposts: true, static: true, status: true,
+  subpost: true, subpost_id: true, tag: true, tag__and: true, tag__in: true, tag__not_in: true,
+  tag_id: true, tag_slug__and: true, tag_slug__in: true, taxonomy: true, tb: true, term: true,
+  terms: true, theme: true, themes: true, title: true, type: true, types: true, w: true,
+  withcomments: true, withoutcomments: true, year: true,
+};
+
+// Post types WordPress registers itself — a taxonomy may legitimately attach to
+// these, so object_type referencing one is never flagged.
+const WP_BUILTIN_POST_TYPES: Record<string, true> = {
+  post: true, page: true, attachment: true, revision: true, nav_menu_item: true,
+  wp_block: true, wp_template: true, wp_template_part: true, wp_navigation: true,
+};
+
+const SLUG_RE = /^[a-z0-9_-]+$/;
+
+export function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+// The exact label set ACF's admin generates from a singular + plural label.
+// Empty strings are ACF's own "leave blank, WordPress default applies" slots.
+export function postTypeLabels(singular: string, plural: string): Record<string, string> {
+  const s = singular;
+  const p = plural;
+  const sl = singular.toLowerCase();
+  const pl = plural.toLowerCase();
+  return {
+    name: p,
+    singular_name: s,
+    menu_name: p,
+    all_items: `All ${p}`,
+    edit_item: `Edit ${s}`,
+    view_item: `View ${s}`,
+    view_items: `View ${p}`,
+    add_new_item: `Add New ${s}`,
+    add_new: `Add New ${s}`,
+    new_item: `New ${s}`,
+    parent_item_colon: `Parent ${s}:`,
+    search_items: `Search ${p}`,
+    not_found: `No ${pl} found`,
+    not_found_in_trash: `No ${pl} found in Trash`,
+    archives: `${s} Archives`,
+    attributes: `${s} Attributes`,
+    featured_image: "",
+    set_featured_image: "",
+    remove_featured_image: "",
+    use_featured_image: "",
+    insert_into_item: `Insert into ${sl}`,
+    uploaded_to_this_item: `Uploaded to this ${sl}`,
+    filter_items_list: `Filter ${pl} list`,
+    filter_by_date: `Filter ${pl} by date`,
+    items_list_navigation: `${p} list navigation`,
+    items_list: `${p} list`,
+    item_published: `${s} published.`,
+    item_published_privately: `${s} published privately.`,
+    item_reverted_to_draft: `${s} reverted to draft.`,
+    item_scheduled: `${s} scheduled.`,
+    item_updated: `${s} updated.`,
+    item_link: `${s} Link`,
+    item_link_description: `A link to a ${sl}.`,
+  };
+}
+
+// ACF emits a different label set for hierarchical (category-like) and
+// non-hierarchical (tag-like) taxonomies — parent_* vs popular_items /
+// add_or_remove_items. Mirrors ACF's admin output including its empty slots.
+export function taxonomyLabels(singular: string, plural: string, hierarchical: boolean): Record<string, string> {
+  const s = singular;
+  const p = plural;
+  const sl = singular.toLowerCase();
+  const pl = plural.toLowerCase();
+  const head: Record<string, string> = {
+    name: p,
+    singular_name: s,
+    menu_name: p,
+    all_items: `All ${p}`,
+    edit_item: `Edit ${s}`,
+    view_item: `View ${s}`,
+    update_item: `Update ${s}`,
+    add_new_item: `Add New ${s}`,
+    new_item_name: `New ${s} Name`,
+  };
+  const tail: Record<string, string> = {
+    items_list_navigation: `${p} list navigation`,
+    items_list: `${p} list`,
+    back_to_items: `\u2190 Go to ${pl}`,
+    item_link: `${s} Link`,
+    item_link_description: `A link to a ${sl}`,
+  };
+  if (hierarchical) {
+    return {
+      ...head,
+      parent_item: "",
+      parent_item_colon: "",
+      search_items: `Search ${p}`,
+      most_used: "",
+      not_found: `No ${pl} found`,
+      no_terms: `No ${pl}`,
+      name_field_description: "",
+      slug_field_description: "",
+      parent_field_description: "",
+      desc_field_description: "",
+      filter_by_item: "",
+      ...tail,
+    };
+  }
+  return {
+    ...head,
+    search_items: `Search ${p}`,
+    popular_items: `Popular ${p}`,
+    separate_items_with_commas: `Separate ${pl} with commas`,
+    add_or_remove_items: `Add or remove ${pl}`,
+    choose_from_most_used: `Choose from the most used ${pl}`,
+    most_used: "",
+    not_found: `No ${pl} found`,
+    no_terms: `No ${pl}`,
+    name_field_description: "",
+    slug_field_description: "",
+    desc_field_description: "",
+    ...tail,
+  };
+}
+
+export interface PostTypeInput {
+  title: string;
+  postType: string; // the register_post_type() key, e.g. "cpt_resource"
+  singular?: string; // label source; defaults to title (no guessing)
+  plural?: string;
+  description?: string;
+  supports?: string[];
+  taxonomies?: string[];
+  hierarchical?: boolean;
+  isPublic?: boolean;
+  showInRest?: boolean;
+  hasArchive?: boolean;
+  archiveSlug?: string;
+  rewriteSlug?: string;
+  menuIcon?: string; // dashicon name, e.g. "dashicons-book"
+  menuPosition?: number;
+  labels?: Record<string, string>; // merged over the generated set
+  active?: boolean;
+  menuOrder?: number;
+  overrides?: Record<string, unknown>; // merged last, wins over everything
+}
+
+export interface TaxonomyInput {
+  title: string;
+  taxonomy: string; // the register_taxonomy() key, e.g. "ct_type"
+  objectType: string[]; // post types the taxonomy attaches to
+  singular?: string;
+  plural?: string;
+  description?: string;
+  hierarchical?: boolean;
+  isPublic?: boolean;
+  showInRest?: boolean;
+  showAdminColumn?: boolean;
+  rewriteSlug?: string;
+  labels?: Record<string, string>;
+  active?: boolean;
+  menuOrder?: number;
+  overrides?: Record<string, unknown>;
+}
+
+export interface OptionsPageInput {
+  title: string;
+  menuSlug?: string; // defaults to slugify(title)
+  pageTitle?: string; // defaults to title
+  menuTitle?: string;
+  parentSlug?: string; // "" = top-level admin menu item
+  capability?: string;
+  position?: string;
+  iconUrl?: string;
+  redirect?: boolean;
+  description?: string;
+  dataStorage?: "options" | "post_id";
+  postId?: string;
+  autoload?: boolean;
+  updateButton?: string;
+  updatedMessage?: string;
+  active?: boolean;
+  menuOrder?: number;
+  overrides?: Record<string, unknown>;
+}
+
+export interface UiBuildResult {
+  object: AcfUiObject;
+  key: string;
+  errors: string[];
+}
+
+// Slug rules ACF enforces in its admin before saving (length + charset +
+// reserved terms + no duplicate within ACF).
+function checkSlug(kind: "post_type" | "taxonomy", slug: string, maxLen: number, index: LoadedIndex): string[] {
+  const errors: string[] = [];
+  const label = kind === "post_type" ? "post type key" : "taxonomy key";
+  if (slug.length === 0) {
+    errors.push(`${label} is required`);
+    return errors;
+  }
+  if (slug.length > maxLen) errors.push(`${label} "${slug}" must be under ${maxLen} characters`);
+  if (!SLUG_RE.test(slug)) errors.push(`${label} "${slug}" must contain only lowercase alphanumerics, underscores or dashes`);
+  if (slug in WP_RESERVED_TERMS) errors.push(`${label} "${slug}" is a WordPress reserved term`);
+  const field = kind === "post_type" ? "post_type" : "taxonomy";
+  const uiKind: UiKind = kind === "post_type" ? "post_type" : "taxonomy";
+  for (const o of index.uiObjects) {
+    if (o._kind === uiKind && o[field] === slug) {
+      errors.push(`${label} "${slug}" is already used by ${o.key} (${o._file})`);
+      break;
+    }
+  }
+  return errors;
+}
+
+function finishUiObject(obj: Record<string, unknown>, overrides: Record<string, unknown> | undefined, kind: UiKind, key: string, errors: string[]): UiBuildResult {
+  if (overrides) {
+    for (const k of ["key", "_kind", "_file"]) {
+      if (k in overrides) errors.push(`overrides may not set ${k}`);
+    }
+    if (errors.length === 0) deepMergeInto(obj, overrides);
+  }
+  obj["_kind"] = kind;
+  obj["_file"] = "";
+  return { object: obj as unknown as AcfUiObject, key, errors };
+}
+
+export function buildPostType(index: LoadedIndex, input: PostTypeInput): UiBuildResult {
+  const errors = checkSlug("post_type", input.postType, 20, index);
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  const key = generateKey("post_type", index.allKeys);
+  const singular = input.singular ?? input.title;
+  const plural = input.plural ?? input.title;
+  const rewriteSlug = input.rewriteSlug ?? "";
+  const hasArchive = input.hasArchive ?? false;
+  const obj: Record<string, unknown> = {
+    key,
+    title: input.title,
+    menu_order: input.menuOrder ?? 0,
+    active: input.active ?? true,
+    post_type: input.postType,
+    advanced_configuration: rewriteSlug.length > 0 || hasArchive,
+    import_source: "",
+    import_date: "",
+    allow_ai_access: false,
+    ai_description: "",
+    labels: { ...postTypeLabels(singular, plural), ...(input.labels ?? {}) },
+    description: input.description ?? "",
+    public: input.isPublic ?? true,
+    hierarchical: input.hierarchical ?? false,
+    exclude_from_search: false,
+    publicly_queryable: true,
+    show_ui: true,
+    show_in_menu: true,
+    admin_menu_parent: "",
+    show_in_admin_bar: true,
+    show_in_nav_menus: true,
+    show_in_rest: input.showInRest ?? true,
+    rest_base: "",
+    rest_namespace: "wp/v2",
+    rest_controller_class: "WP_REST_Posts_Controller",
+    menu_position: typeof input.menuPosition === "number" ? input.menuPosition : "",
+    menu_icon: input.menuIcon ? { type: "dashicons", value: input.menuIcon } : "",
+    rename_capabilities: false,
+    singular_capability_name: "post",
+    plural_capability_name: "posts",
+    supports: input.supports ?? ["title", "editor", "thumbnail", "custom-fields"],
+    taxonomies: input.taxonomies ?? [],
+    has_archive: hasArchive,
+    has_archive_slug: input.archiveSlug ?? "",
+    rewrite:
+      rewriteSlug.length > 0
+        ? { permalink_rewrite: "custom_permalink", slug: rewriteSlug, with_front: "1", feeds: "0", pages: "1" }
+        : { permalink_rewrite: "post_type_key", with_front: "1", feeds: "0", pages: "1" },
+    query_var: "post_type_key",
+    query_var_name: "",
+    can_export: true,
+    delete_with_user: false,
+    register_meta_box_cb: "",
+    enter_title_here: "",
+  };
+  return finishUiObject(obj, input.overrides, "post_type", key, errors);
+}
+
+export function buildTaxonomy(index: LoadedIndex, input: TaxonomyInput): UiBuildResult {
+  const errors = checkSlug("taxonomy", input.taxonomy, 32, index);
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  if (!Array.isArray(input.objectType) || input.objectType.length === 0) {
+    errors.push("objectType is required — a taxonomy must attach to at least one post type");
+  }
+  const key = generateKey("taxonomy", index.allKeys);
+  const singular = input.singular ?? input.title;
+  const plural = input.plural ?? input.title;
+  const hierarchical = input.hierarchical ?? false;
+  const rewriteSlug = input.rewriteSlug ?? "";
+  const obj: Record<string, unknown> = {
+    key,
+    title: input.title,
+    menu_order: input.menuOrder ?? 0,
+    active: input.active ?? true,
+    taxonomy: input.taxonomy,
+    object_type: Array.isArray(input.objectType) ? [...input.objectType] : [],
+    advanced_configuration: rewriteSlug.length > 0,
+    import_source: "",
+    import_date: "",
+    labels: { ...taxonomyLabels(singular, plural, hierarchical), ...(input.labels ?? {}) },
+    description: input.description ?? "",
+    capabilities: {
+      manage_terms: "manage_categories",
+      edit_terms: "manage_categories",
+      delete_terms: "manage_categories",
+      assign_terms: "edit_posts",
+    },
+    public: input.isPublic ?? true,
+    publicly_queryable: true,
+    hierarchical,
+    show_ui: true,
+    show_in_menu: true,
+    show_in_nav_menus: true,
+    show_in_rest: input.showInRest ?? true,
+    rest_base: "",
+    rest_namespace: "wp/v2",
+    rest_controller_class: "WP_REST_Terms_Controller",
+    show_tagcloud: true,
+    show_in_quick_edit: true,
+    show_admin_column: input.showAdminColumn ?? false,
+    rewrite:
+      rewriteSlug.length > 0
+        ? { permalink_rewrite: "custom_permalink", slug: rewriteSlug, with_front: "1", rewrite_hierarchical: "0" }
+        : { permalink_rewrite: "taxonomy_key", with_front: "1", rewrite_hierarchical: "0" },
+    query_var: "taxonomy_key",
+    query_var_name: "",
+    default_term: { default_term_enabled: false },
+    sort: false,
+    meta_box: "default",
+    meta_box_cb: "",
+    meta_box_sanitize_cb: "",
+    allow_ai_access: false,
+    ai_description: "",
+  };
+  return finishUiObject(obj, input.overrides, "taxonomy", key, errors);
+}
+
+export function buildOptionsPage(index: LoadedIndex, input: OptionsPageInput): UiBuildResult {
+  const errors: string[] = [];
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  const menuSlug = input.menuSlug && input.menuSlug.length > 0 ? input.menuSlug : slugify(input.title ?? "");
+  if (menuSlug.length === 0) errors.push("menuSlug is required (title produced an empty slug)");
+  for (const o of index.uiObjects) {
+    if (o._kind === "options_page" && o["menu_slug"] === menuSlug) {
+      errors.push(`menu_slug "${menuSlug}" is already used by ${o.key} (${o._file})`);
+      break;
+    }
+  }
+  const dataStorage = input.dataStorage ?? "options";
+  if (dataStorage === "post_id" && (input.postId ?? "").length === 0) {
+    errors.push('dataStorage "post_id" requires postId');
+  }
+  const key = generateKey("ui_options_page", index.allKeys);
+  const parentSlug = input.parentSlug ?? "";
+  const obj: Record<string, unknown> = {
+    key,
+    title: input.title,
+    active: input.active ?? true,
+    menu_order: input.menuOrder ?? 0,
+    page_title: input.pageTitle ?? input.title,
+    menu_slug: menuSlug,
+    parent_slug: parentSlug,
+    advanced_configuration: Boolean(input.capability || input.iconUrl || input.position || input.redirect || input.description),
+    icon_url: input.iconUrl ?? "",
+    menu_title: input.menuTitle ?? "",
+    position: input.position ?? "",
+    redirect: input.redirect ?? false,
+    description: input.description ?? "",
+    menu_icon: [],
+    update_button: input.updateButton ?? "Update",
+    updated_message: input.updatedMessage ?? "Options Updated",
+    capability: input.capability ?? "edit_posts",
+    data_storage: dataStorage,
+    post_id: input.postId ?? "",
+    autoload: input.autoload ?? false,
+  };
+  return finishUiObject(obj, input.overrides, "options_page", key, errors);
+}
+
+// updateUiObject — merge a patch onto an existing UI object IN PLACE, keeping
+// its key (so the ACF DB row it maps to survives). Objects deep-merge, arrays
+// and scalars replace. Pure: returns a new object.
+export function updateUiObject(index: LoadedIndex, key: string, patch: Record<string, unknown>): { updated: AcfUiObject; errors: string[] } {
+  const errors: string[] = [];
+  const matches = index.uiObjects.filter((o) => o.key === key);
+  const target = matches[0];
+  if (!target) return { updated: {} as AcfUiObject, errors: [`UI object ${key} not found`] };
+  for (const k of ["key", "_kind", "_file"]) {
+    if (k in patch) errors.push(`patch may not change ${k}`);
+  }
+  if (errors.length > 0) return { updated: target, errors };
+  const next: Record<string, unknown> = JSON.parse(JSON.stringify(stripSynthetic(target)));
+  deepMergeInto(next, patch);
+  next["_kind"] = target._kind;
+  next["_file"] = target._file;
+  return { updated: next as unknown as AcfUiObject, errors };
+}
+
+// Drop the synthetic keys before serialising (writers must never emit them).
+export function stripSynthetic(o: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(o)) {
+    if (k === "_file" || k === "_kind") continue;
+    out[k] = o[k];
+  }
+  return out;
+}
+
+// One compact line per UI object: kind, key, title, the slug that matters for
+// that kind, active flag, file.
+export function outlineUiObjects(index: LoadedIndex, kind?: UiKind): string {
+  const objs = kind ? index.uiObjects.filter((o) => o._kind === kind) : index.uiObjects;
+  const lines = objs.map((o) => {
+    const slug =
+      o._kind === "post_type" ? `post_type=${String(o["post_type"] ?? "")}`
+      : o._kind === "taxonomy" ? `taxonomy=${String(o["taxonomy"] ?? "")} object_type=[${(Array.isArray(o["object_type"]) ? o["object_type"] : []).join(",")}]`
+      : `menu_slug=${String(o["menu_slug"] ?? "")} parent=${String(o["parent_slug"] ?? "") || "(top level)"}`;
+    return `${o._kind}  ${o.key}  "${o.title}"  ${slug}  active=${o.active}  ${o._file}`;
+  });
+  return lines.join("\n");
+}
+
+// validateUiObjects — the UI-object half of `validate`. Key format/collisions,
+// ACF's own slug rules, and cross-artifact references (a taxonomy pointing at a
+// post type nothing defines, an options page slug used twice).
+export function validateUiObjects(index: LoadedIndex, key?: string): Finding[] {
+  const findings: Finding[] = [];
+  const objs = key ? index.uiObjects.filter((o) => o.key === key) : index.uiObjects;
+
+  // Duplicate keys across files (same key in two dirs = ACF imports one twice).
+  const keyFiles = new Map<string, Set<string>>();
+  for (const o of index.uiObjects) {
+    const set = keyFiles.get(o.key) ?? new Set<string>();
+    set.add(o._file);
+    keyFiles.set(o.key, set);
+  }
+  for (const [k, files] of keyFiles) {
+    if (files.size > 1) {
+      findings.push({ severity: "error", file: [...files].sort().join(", "), path: "(global)", message: `duplicate key ${k} appears in ${files.size} files`, fix: "delete the stale copy or regenerate one key" });
+    }
+  }
+
+  const acfPostTypes = new Set<string>();
+  for (const o of index.uiObjects) {
+    if (o._kind === "post_type" && typeof o["post_type"] === "string") acfPostTypes.add(o["post_type"]);
+  }
+
+  for (const o of objs) {
+    const file = o._file;
+    const prefix = UI_KEY_PREFIX[o._kind];
+    if (!new RegExp(`^${prefix}_[0-9a-fA-F]{12,13}$`).test(o.key)) {
+      findings.push({ severity: "warning", file, path: "key", message: `key ${o.key} is not ${prefix}_<12-13hex> uniqid format; ACF still resolves it by exact key`, fix: `optional: regenerate with generateKey('${prefix}', …)` });
+    }
+    const fn = basename(file, ".json");
+    if (fn !== o.key) {
+      findings.push({ severity: "warning", file, path: "key", message: `key ${o.key} does not match filename ${fn}.json`, fix: "rename the file to <key>.json so ACF's sync screen matches it" });
+    }
+    if (typeof o.title !== "string" || o.title.length === 0) {
+      findings.push({ severity: "error", file, path: "title", message: "title is empty", fix: "set a non-empty title" });
+    }
+
+    if (o._kind === "post_type") {
+      const slug = typeof o["post_type"] === "string" ? o["post_type"] : "";
+      findings.push(...slugFindings(file, "post_type", slug, 20));
+      if (!Array.isArray(o["supports"]) && o["supports"] !== false) {
+        findings.push({ severity: "warning", file, path: "supports", message: "supports is not an array", fix: 'set supports to an array, e.g. ["title","editor","thumbnail"]' });
+      }
+      if (o["has_archive"] === true && typeof o["has_archive_slug"] === "string" && o["has_archive_slug"].length === 0) {
+        findings.push({ severity: "info", file, path: "has_archive_slug", message: "archive enabled with no archive slug — WordPress falls back to the post type key", fix: "set has_archive_slug to the desired archive path" });
+      }
+    }
+
+    if (o._kind === "taxonomy") {
+      const slug = typeof o["taxonomy"] === "string" ? o["taxonomy"] : "";
+      findings.push(...slugFindings(file, "taxonomy", slug, 32));
+      const objectTypes = Array.isArray(o["object_type"]) ? o["object_type"] : [];
+      if (objectTypes.length === 0) {
+        findings.push({ severity: "warning", file, path: "object_type", message: "taxonomy is attached to no post type", fix: "add at least one post type key to object_type" });
+      }
+      for (const [i, pt] of objectTypes.entries()) {
+        if (typeof pt !== "string") {
+          findings.push({ severity: "error", file, path: `object_type[${i}]`, message: "object_type entry is not a string", fix: "use post type keys" });
+          continue;
+        }
+        if (!acfPostTypes.has(pt) && !(pt in WP_BUILTIN_POST_TYPES)) {
+          findings.push({ severity: "info", file, path: `object_type[${i}]`, message: `post type "${pt}" is not defined by any ACF post type in this project (it may be registered in PHP)`, fix: "confirm the post type key or create it with acf_create_post_type" });
+        }
+      }
+    }
+
+    if (o._kind === "options_page") {
+      const menuSlug = typeof o["menu_slug"] === "string" ? o["menu_slug"] : "";
+      if (menuSlug.length === 0) {
+        findings.push({ severity: "error", file, path: "menu_slug", message: "menu_slug is empty", fix: "set a unique menu_slug — location rules reference it" });
+      } else {
+        const clash = index.uiObjects.find((x) => x._kind === "options_page" && x.key !== o.key && x["menu_slug"] === menuSlug);
+        if (clash) {
+          findings.push({ severity: "error", file, path: "menu_slug", message: `menu_slug "${menuSlug}" is also used by ${clash.key} (${clash._file})`, fix: "make each options page menu_slug unique" });
+        }
+      }
+      const storage = o["data_storage"];
+      if (storage !== "options" && storage !== "post_id") {
+        findings.push({ severity: "error", file, path: "data_storage", message: `data_storage "${String(storage)}" is invalid`, fix: 'use "options" or "post_id"' });
+      } else if (storage === "post_id" && (typeof o["post_id"] !== "string" || o["post_id"].length === 0)) {
+        findings.push({ severity: "error", file, path: "post_id", message: 'data_storage is "post_id" but post_id is empty', fix: "set post_id to the post storing these options" });
+      }
+      if (typeof o["page_title"] !== "string" || o["page_title"].length === 0) {
+        findings.push({ severity: "warning", file, path: "page_title", message: "page_title is empty — the admin screen renders with no heading", fix: "set page_title" });
+      }
+    }
+  }
+
+  return findings;
+}
+
+function slugFindings(file: string, field: "post_type" | "taxonomy", slug: string, maxLen: number): Finding[] {
+  const out: Finding[] = [];
+  if (slug.length === 0) {
+    out.push({ severity: "error", file, path: field, message: `${field} key is empty`, fix: `set ${field} to the register_${field}() key` });
+    return out;
+  }
+  if (slug.length > maxLen) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" exceeds ${maxLen} characters`, fix: `shorten the ${field} key` });
+  if (!SLUG_RE.test(slug)) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" has characters outside [a-z0-9_-]`, fix: "use lowercase alphanumerics, underscores or dashes" });
+  if (slug in WP_RESERVED_TERMS) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" is a WordPress reserved term`, fix: "pick a non-reserved key (prefix it, e.g. cpt_/ct_)" });
+  return out;
 }

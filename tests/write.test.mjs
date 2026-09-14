@@ -1,12 +1,12 @@
 // Write test: real acf_add_field against a temp copy of the efront corpus.
 // Confirms disk write + modified stamp. Exits 0 on success.
 
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { cpSync, mkdtempSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { startHarness, assert } from "./harness.mjs";
+import { startHarness, assert, CORPUS } from "./harness.mjs";
 
-const SRC = resolve(process.env.HOME ?? "", "Documents/Sites/efront-boilerplate-wordpress-theme/acf-json");
+const SRC = join(CORPUS, "acf-json");
 
 async function main() {
   const tmp = mkdtempSync(join(tmpdir(), "acf-mcp-write-"));

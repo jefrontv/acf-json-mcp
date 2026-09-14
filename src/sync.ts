@@ -143,33 +143,85 @@ function parsePerGroup(stdout: string): { key: string; status: "imported" | "upd
   }
   return out;
 }
+
 // ---------------------------------------------------------------------------
-// The wp eval fallback PHP snippet. Globs acf-json/group_*.json, decodes,
-// calls acf_import_field_group() with try/catch per group. Echoes one JSON
-// status line per group.
+// The wp eval fallback PHP snippet. Globs the acf-json dir per artifact kind
+// and calls ACF's matching importer: acf_import_field_group() for field groups,
+// acf_import_post_type() / acf_import_taxonomy() / acf_import_ui_options_page()
+// for the ACF 6.1+ internal post types. Echoes one JSON status line per file.
 // ---------------------------------------------------------------------------
 
-function buildEvalPhp(acfJsonAbsDir: string): string {
+// glob pattern -> ACF import function. Field groups first: a post type a group
+// targets should exist before the group referencing it lands.
+const IMPORTERS: Array<{ pattern: string; fn: string; ui: boolean }> = [
+  { pattern: "group_*.json", fn: "acf_import_field_group", ui: false },
+  { pattern: "post_type_*.json", fn: "acf_import_post_type", ui: true },
+  { pattern: "taxonomy_*.json", fn: "acf_import_taxonomy", ui: true },
+  { pattern: "ui_options_page_*.json", fn: "acf_import_ui_options_page", ui: true },
+];
+
+export type EvalScope = "all" | "ui";
+
+export function buildEvalPhp(acfJsonAbsDir: string, scope: EvalScope): string {
+  const targets = IMPORTERS.filter((t) => scope === "all" || t.ui);
+  const phpTargets = targets.map((t) => `[${JSON.stringify(t.pattern)}, ${JSON.stringify(t.fn)}]`).join(", ");
   // PHP glob uses an absolute path so the eval doesn't depend on cwd.
   return `
 <?php
 \$dir = ${JSON.stringify(acfJsonAbsDir)};
-\$files = glob(\$dir . '/group_*.json');
-if (!is_array(\$files)) { echo json_encode(['error' => 'glob failed']); exit; }
-foreach (\$files as \$f) {
-  try {
-    \$raw = file_get_contents(\$f);
-    if (\$raw === false) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => 'read failed']) . "\n"; continue; }
-    \$group = json_decode(\$raw, true);
-    if (!is_array(\$group)) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => 'json decode failed']) . "\n"; continue; }
-    if (!function_exists('acf_import_field_group')) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => 'acf_import_field_group missing']) . "\n"; continue; }
-    acf_import_field_group(\$group);
-    echo json_encode(['file' => basename(\$f), 'status' => 'imported']) . "\n";
-  } catch (\Throwable \$e) {
-    echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => \$e->getMessage()]) . "\n";
+\$targets = [${phpTargets}];
+foreach (\$targets as \$target) {
+  \$files = glob(\$dir . '/' . \$target[0]);
+  \$fn = \$target[1];
+  if (!is_array(\$files)) { continue; }
+  foreach (\$files as \$f) {
+    try {
+      \$raw = file_get_contents(\$f);
+      if (\$raw === false) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => 'read failed']) . "\n"; continue; }
+      \$data = json_decode(\$raw, true);
+      if (!is_array(\$data)) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => 'json decode failed']) . "\n"; continue; }
+      if (!function_exists(\$fn)) { echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => \$fn . ' missing — ACF version too old or ACF PRO inactive']) . "\n"; continue; }
+      \$fn(\$data);
+      echo json_encode(['file' => basename(\$f), 'status' => 'imported']) . "\n";
+    } catch (\Throwable \$e) {
+      echo json_encode(['file' => basename(\$f), 'status' => 'error', 'error' => \$e->getMessage()]) . "\n";
+    }
   }
 }
 `.trim();
+}
+
+// Parse the one-JSON-line-per-file output the eval snippet echoes.
+function parseEvalLines(stdout: string): { key: string; status: "imported" | "updated" | "skipped" | "error"; error?: string }[] {
+  const out: { key: string; status: "imported" | "updated" | "skipped" | "error"; error?: string }[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.trim().length === 0) continue;
+    let obj: unknown;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue; // not a JSON line; skip
+    }
+    if (!isRecord(obj)) continue;
+    if (typeof obj["file"] !== "string") continue;
+    const file = obj["file"];
+    const statusStr = typeof obj["status"] === "string" ? obj["status"] : "error";
+    const mapped: "imported" | "updated" | "skipped" | "error" =
+      statusStr === "imported" || statusStr === "updated" || statusStr === "skipped" ? statusStr : "error";
+    const err = typeof obj["error"] === "string" ? obj["error"] : undefined;
+    out.push({ key: file, status: mapped, error: err });
+  }
+  return out;
+}
+
+// Does this acf-json dir hold any ACF 6.1+ UI objects? `wp acf json sync` only
+// syncs field groups, so their presence means an extra import pass is needed.
+function hasUiObjectFiles(acfJsonDir: string): boolean {
+  try {
+    return readdirSync(acfJsonDir).some((e) => /^(post_type|taxonomy|ui_options_page)_.*\.json$/.test(e));
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,53 +315,53 @@ export async function runSync(projectRoot: string, opts?: SyncOpts): Promise<Syn
   const status = runWp(wpBin, ["acf", "json", "status"], wpRoot);
   const acfCmdKnown = status.status === 0;
 
+  const hasUi = hasUiObjectFiles(acfDir);
+
   if (acfCmdKnown) {
-    // 5. wp_acf_json_sync path.
+    // 5. wp_acf_json_sync path. That command only knows about field groups, so
+    // post types / taxonomies / options pages get a second import pass through
+    // wp eval — otherwise they silently never reach the database.
     const syncArgs = buildWpCommand({ dryRun, key });
     const r = runWp(wpBin, syncArgs, wpRoot);
     const perGroup = parsePerGroup(r.stdout);
-    const ok = r.status === 0;
+    let ok = r.status === 0;
+    let uiNote = "";
+    let uiStdout = "";
+    let uiStderr = "";
+    if (hasUi && !dryRun) {
+      const rui = runWp(wpBin, ["eval", buildEvalPhp(acfDir, "ui")], wpRoot);
+      const uiResults = parseEvalLines(rui.stdout);
+      perGroup.push(...uiResults);
+      uiStdout = rui.stdout;
+      uiStderr = rui.stderr;
+      if (rui.status !== 0) ok = false;
+      uiNote = ` Imported ${uiResults.length} post type/taxonomy/options page file(s) via wp eval (wp acf json sync covers field groups only).`;
+    } else if (hasUi && dryRun) {
+      uiNote = " Post type/taxonomy/options page files were NOT touched — the eval importer they need has no dry-run.";
+    }
     return {
       ok,
       method: "wp_acf_json_sync",
       message: ok
-        ? `Synced acf-json/*.json into the database via wp acf json sync${dryRun ? " (dry-run)" : ""}.`
-        : `wp acf json sync exited non-zero (status=${r.status}).`,
+        ? `Synced acf-json/*.json into the database via wp acf json sync${dryRun ? " (dry-run)" : ""}.${uiNote}`
+        : `wp acf json sync exited non-zero (status=${r.status}).${uiNote}`,
       perGroup: perGroup.length > 0 ? perGroup : undefined,
-      rawStdout: r.stdout,
-      rawStderr: r.stderr,
+      rawStdout: uiStdout ? r.stdout + "\n" + uiStdout : r.stdout,
+      rawStderr: uiStderr ? r.stderr + "\n" + uiStderr : r.stderr,
     };
   }
 
-  // 6. wp_eval_fallback path. `wp acf json` unknown → use wp eval.
-  const php = buildEvalPhp(acfDir);
+  // 6. wp_eval_fallback path. `wp acf json` unknown → use wp eval for every
+  // artifact kind: field groups, post types, taxonomies and options pages.
+  const php = buildEvalPhp(acfDir, "all");
   const r = runWp(wpBin, ["eval", php], wpRoot);
-  // Parse per-line JSON status from eval output. JSON.parse returns unknown;
-  // narrow with the isRecord guard — no `as { … }` casts.
-  const perGroup: { key: string; status: "imported" | "updated" | "skipped" | "error"; error?: string }[] = [];
-  for (const line of r.stdout.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue; // not a JSON line; skip
-    }
-    if (!isRecord(obj)) continue;
-    if (typeof obj["file"] !== "string") continue;
-    const file = obj["file"];
-    const statusStr = typeof obj["status"] === "string" ? obj["status"] : "error";
-    const mapped: "imported" | "updated" | "skipped" | "error" =
-      statusStr === "imported" || statusStr === "updated" || statusStr === "skipped" ? statusStr : "error";
-    const err = typeof obj["error"] === "string" ? obj["error"] : undefined;
-    perGroup.push({ key: file, status: mapped, error: err });
-  }
+  const perGroup = parseEvalLines(r.stdout);
   const ok = r.status === 0;
   return {
     ok,
     method: "wp_eval_fallback",
     message: ok
-      ? `Imported acf-json/group_*.json via wp eval (acf_import_field_group fallback)${dryRun ? " — note: dry-run is ignored by the eval fallback" : ""}.`
+      ? `Imported acf-json/*.json via wp eval (acf_import_field_group / acf_import_post_type / acf_import_taxonomy / acf_import_ui_options_page)${dryRun ? " — note: dry-run is ignored by the eval fallback" : ""}.`
       : `wp eval fallback exited non-zero (status=${r.status}). ACF PRO wp-cli command was not available.`,
     perGroup: perGroup.length > 0 ? perGroup : undefined,
     rawStdout: r.stdout,

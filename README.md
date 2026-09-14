@@ -12,21 +12,22 @@ ACF's local JSON sync is the right workflow for version-controlling field groups
 - Each field type has its own required keys + defaults. Missing one silently breaks the field.
 - Back-refs must stay in sync: `parent_repeater` on repeater children, `parent_layout` on flexible-content layout children.
 - JSON edits don't take effect in WP until **admin "Sync available"** — this server can trigger that via `acf_sync`.
+- ACF 6.1+ also writes **post types**, **taxonomies** and **options pages** into the same directory (`post_type_*.json`, `taxonomy_*.json`, `ui_options_page_*.json`), with their own key rules and a large generated label set.
 
-The 22 `acf_*` tools do the structural work safely; `acf_sync` closes the DB-sync gap.
+The 28 `acf_*` tools do the structural work safely; `acf_sync` closes the DB-sync gap.
 
-## Tools (22, model-callable)
+## Tools (28, model-callable)
 
 | Tool | Purpose |
 | --- | --- |
 | `acf_generate_key` | Mint a collision-free `group_`/`field_`/`layout_` key (`uniqid('', true)` 13-hex), verified against all loaded keys. |
 | `acf_find_field` | Locate fields by `name`, `key`, `type`, name-substring (`nameContains`), and/or `groupKey` (filters combine); returns file, parent chain, full object. |
-| `acf_validate` | Schema-validate one group or all: key format, collisions, `parent_repeater` resolution, `clone` targets, `layouts` dict shape, `conditional_logic` refs, `acfe_autosync`. Severity-tagged findings. |
+| `acf_validate` | Schema-validate one group or all: key format, collisions, `parent_repeater` resolution, `clone` targets, `layouts` dict shape, `conditional_logic` refs, `acfe_autosync`. Also validates post types / taxonomies / options pages (slug length + charset, WordPress reserved terms, duplicate `menu_slug`, `object_type` targets). Severity-tagged findings. |
 | `acf_references` | Reference graph: clone / `parent_repeater` / `conditional_logic` edges with resolution status. |
 | `acf_add_field` | Build a type-correct field (templated types get type-specific defaults; any other recognised ACF/PRO/ACFE type is accepted with base defaults) and insert it top-level, into a repeater's/group's `sub_fields` (`parent_repeater`), or a flex layout's `sub_fields` (`parent_layout`). |
 | `acf_move_field` | Relocate a field between groups/parents — including parents nested inside flexible-content — preserving its key, setting the correct back-ref and stripping stale ones. |
 | `acf_clone_layout` | Deep-copy a flexible-content layout: new layout key, regenerated child + nested-layout keys, with back-refs + `conditional_logic` remapped to the new keys (external `clone` targets untouched). |
-| `acf_sync` | Sync `acf-json/*.json` into the DB via `wp acf json sync` (ACF PRO), a `wp eval` fallback, or instructions for the `ocsites` MCP tool when `wp` is unavailable. |
+| `acf_sync` | Sync `acf-json/*.json` into the DB via `wp acf json sync` (ACF PRO) plus a `wp eval` pass for post types / taxonomies / options pages (which `wp acf json sync` does not cover), a full `wp eval` fallback, or instructions for the `ocsites` MCP tool when `wp` is unavailable. |
 | `acf_remove_field` | Remove a field by key from a group/repeater/layout; scrubs same-group `conditional_logic`; reports clone referrers (or removes them with `scrubClones`); `dryRun` previews. |
 | `acf_reorder_field` | Move a field to a new index within its current parent (group fields, a repeater's or layout's `sub_fields`). |
 | `acf_repair` | Strip dangling `parent_repeater`/`parent_layout` back-refs (refs that don't resolve in the same group) from one group or all. |
@@ -41,6 +42,12 @@ The 22 `acf_*` tools do the structural work safely; `acf_sync` closes the DB-syn
 | `acf_rename_field` | Rename a field's `name` and/or `key`; a key change rewrites every `parent_*`/`clone`/`conditional_logic` ref across all groups. `dryRun` previews. |
 | `acf_outline` | Compact tree (key/type/name/nesting) of one group or all — orient without reading the full JSON. |
 | `acf_list_groups` | List all groups: key, title, field count, location-rule-group count, file path. |
+| `acf_list_ui_objects` | List the ACF post types, taxonomies and options pages in the project: kind, key, title, slug, active flag, file. Filter with `kind`. |
+| `acf_create_post_type` | Create a post type (`post_type_<key>.json`) with ACF 6.x defaults and the full generated label set. Enforces ACF's key rules: ≤ 20 chars, `[a-z0-9_-]`, not a WordPress reserved term, not already used. `dryRun` previews. |
+| `acf_create_taxonomy` | Create a taxonomy (`taxonomy_<key>.json`) attached to one or more post types, with the label set ACF generates for its hierarchy style. Key rules: ≤ 32 chars, same charset + reserved-term + duplicate checks. `dryRun` previews. |
+| `acf_create_options_page` | Create an options page (`ui_options_page_<key>.json`). `menuSlug` defaults to a slug of the title and is what an `options_page` location rule references; `parentSlug` nests it under another admin menu. `dryRun` previews. |
+| `acf_update_ui_object` | Edit a post type / taxonomy / options page in place by key (key preserved → the ACF DB row and location rules keep resolving); objects deep-merge, arrays and scalars replace. `dryRun` previews. |
+| `acf_delete_ui_object` | Delete a `post_type_*`/`taxonomy_*`/`ui_options_page_*` JSON file by key. `dryRun` previews. |
 
 All tools take an optional `projectRoot` (default: the `ACF_JSON_PROJECT_ROOT` env var, or the server's working directory). Mutating tools bump `modified`, write **atomically** (temp + rename — a multi-file move/repair never half-applies), and accept `dryRun` to preview the would-be writes without touching disk.
 
@@ -193,7 +200,7 @@ Useful for development. The bundled `dist/index.js` is the recommended productio
 acf-json-mcp/
 ├── src/
 │   ├── index.ts      # MCP server entry: stdio transport
-│   ├── tools.ts      # 22 tool registrations (the MCP adapter layer)
+│   ├── tools.ts      # 28 tool registrations (the MCP adapter layer)
 │   ├── helpers.ts    # index cache, atomic writes, output formatting, raw-record guards
 │   ├── engine.ts     # pure engine: discovery, loader, key-gen, validator, reference graph, move/clone, templates (node builtins only)
 │   └── sync.ts       # sync logic: wp acf json sync / wp eval fallback / ocsites instructions (node builtins only)
@@ -213,12 +220,26 @@ Tests spawn the bundled server over stdio — build first, then run:
 
 ```sh
 npm run build
-npm test                         # all three suites
+npm test                         # every suite
 npm run test:smoke               # one suite at a time
 npm run test:mutation
 npm run test:write
-npm run typecheck                 # tsc --noEmit (strict)
+npm run test:guards
+npm run test:ui
+npm run typecheck                # tsc --noEmit (strict)
 ```
+
+To run against uncompiled sources — the fast way to check a change before the
+bundle is rebuilt, and the way to catch a stale `dist/` — point the harness at
+`src/index.ts` (needs Bun):
+
+```sh
+ACF_MCP_SERVER=src/index.ts npm test
+```
+
+The smoke and write suites read the efront boilerplate theme as a corpus; set
+`ACF_MCP_CORPUS` if yours lives somewhere other than
+`~/Sites/efront-boilerplate-wordpress-theme`.
 
 ## How project root resolves
 
@@ -235,14 +256,15 @@ This lets one server serve every project (unpinned → follows `CLAUDE_PROJECT_D
 
 ## Provenance
 
-The engine + sync logic are ported verbatim from the [oh-my-pi](https://github.com/ogulcancelik/oh-my-pi) `acf-json` extension (`~/.omp/agent/extensions/acf-json`). The OMP extension wraps the same logic as 22 tools + a `tool_call` guard that blocks raw `write`/`edit` to `group_*.json`. This MCP server exposes the same 22 tools over stdio MCP; the `tool_call` guard is harness-side and not part of the server (configure it in your agent if you want enforced no-hand-edit).
+The engine + sync logic started as a verbatim port of the [oh-my-pi](https://github.com/ogulcancelik/oh-my-pi) `acf-json` extension (`~/.omp/agent/extensions/acf-json`), which wraps the same logic as 22 tools + a `tool_call` guard that blocks raw `write`/`edit` to `group_*.json`. This MCP server exposes those 22 tools plus 6 for ACF's post types, taxonomies and options pages; the `tool_call` guard is harness-side and not part of the server (configure it in your agent if you want enforced no-hand-edit).
 
 ## ACF facts the toolset relies on
 
-- **Key format**: `group_`/`field_`/`layout_` + 13 hex chars = `uniqid('', true)` (8-char time + 5-char entropy). Some legacy 12-char field keys exist in the wild.
+- **Key format**: `group_`/`field_`/`layout_`/`post_type_`/`taxonomy_`/`ui_options_page_` + 13 hex chars = `uniqid('', true)` (8-char time + 5-char entropy). Some legacy 12-char field keys exist in the wild.
 - **Back-refs**: `parent_repeater` = the parent repeater's key (repeater children); `parent_layout` = the layout's key (flexible-content layout children) — confirmed in ACF PRO source (`class-acf-field-flexible-content.php`). All refs (clone / parent_* / conditional_logic) resolve by **exact key string**, not uniqid format, so readable/legacy keys are valid and resolvable.
 - **`layouts`** (flexible content): a **dict** keyed by layout key, not an array.
 - **`clone`**: a `clone` field's `clone` array references `group_`/`field_` keys elsewhere in the index.
 - **`acfe_autosync`** (ACF Extended): should contain `"json"` for local JSON sync to fire automatically.
 - **Sync**: `wp acf json sync` is the ACF PRO WP-CLI command. `wp acf json status` is the read-only probe. `--dry-run` + `--key=<key>` flags supported.
+- **UI objects** (ACF 6.1+): post types, taxonomies and options pages are stored beside field groups as `post_type_*.json`, `taxonomy_*.json` and `ui_options_page_*.json`. Post type keys are ≤ 20 chars, taxonomy keys ≤ 32, both `[a-z0-9_-]` and never a [WordPress reserved term](https://codex.wordpress.org/Reserved_Terms). Labels are a generated set derived from the singular + plural label; this server reproduces ACF's own output exactly. `wp acf json sync` does **not** import them — `acf_sync` runs ACF's `acf_import_post_type()` / `acf_import_taxonomy()` / `acf_import_ui_options_page()` for those files itself.
 - **`modified`**: group-level Unix epoch seconds. Every mutating tool bumps it on write so ACF/admin sees the change.

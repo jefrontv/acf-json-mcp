@@ -12,8 +12,11 @@ import { resolve, join, sep, basename } from "node:path";
 
 import {
   loadIndex,
+  stripSynthetic,
+  ACF_FILE_RE,
   type LoadedIndex,
   type AcfGroup,
+  type AcfUiObject,
   type Finding,
   type ReferenceEdge,
 } from "./engine.ts";
@@ -31,17 +34,18 @@ let cachedIndex: LoadedIndex | null = null;
 let cachedRoot: string | null = null;
 let cachedSig: string | null = null;
 
-// Fingerprint the already-discovered acf-json dirs: each group_*.json's
+// Fingerprint the already-discovered acf-json dirs: each ACF JSON file's
 // path + mtime + size. Re-reading these few dirs is far cheaper than the full
 // project-tree walk loadIndex does, yet detects any edit/add/delete of a group
-// file. (A brand-new acf-json dir appearing mid-session is the one case this
-// misses; it surfaces on the next full reload.)
+// or UI-object file. (A brand-new acf-json dir appearing mid-session is the one
+// case this misses; it surfaces on the next full reload.)
 export function indexSignature(idx: LoadedIndex): string {
   const parts: string[] = [];
-  for (const dir of [...idx.dirToGroups.keys()].sort()) {
+  const dirs = new Set<string>([...idx.dirToGroups.keys(), ...idx.dirToUiObjects.keys()]);
+  for (const dir of [...dirs].sort()) {
     let names: string[];
     try {
-      names = readdirSync(dir).filter((e) => /^group_.*\.json$/.test(e)).sort();
+      names = readdirSync(dir).filter((e) => ACF_FILE_RE.test(e)).sort();
     } catch {
       parts.push(`${dir}\u0000ERR`);
       continue;
@@ -138,30 +142,23 @@ export function formatSyncResult(res: SyncResult): string {
 }
 
 // ---------------------------------------------------------------------------
-// Write helpers — strip the synthetic _file key, 4-space indent, trailing nl.
+// Write helpers — strip the synthetic _file/_kind keys, 4-space indent,
+// trailing nl. Used for field groups and UI objects alike; both are plain ACF
+// JSON records that carry a `modified` stamp.
 // ---------------------------------------------------------------------------
 
-export function stripFileKey<T extends Record<string, unknown>>(g: T): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const k of Object.keys(g)) {
-    if (k === "_file") continue;
-    out[k] = g[k];
-  }
-  return out;
+export function writeAcfFile(file: string, record: Record<string, unknown>): void {
+  writeAcfFilesAtomic([{ file, group: record }]);
 }
 
-export function writeGroupFile(file: string, group: Record<string, unknown>): void {
-  writeGroupFilesAtomic([{ file, group }]);
-}
-
-// Atomic batch write: stamp `modified`, write every group to a temp file, then
+// Atomic batch write: stamp `modified`, write every record to a temp file, then
 // rename them all into place. If any temp write fails, no original is touched —
 // prevents the half-applied multi-file move/repair data-loss case.
-export function writeGroupFilesAtomic(entries: Array<{ file: string; group: Record<string, unknown> }>): void {
+export function writeAcfFilesAtomic(entries: Array<{ file: string; group: Record<string, unknown> }>): void {
   const tmps: Array<{ tmp: string; file: string }> = [];
   try {
     for (const e of entries) {
-      const out = stripFileKey(e.group);
+      const out = stripSynthetic(e.group);
       out["modified"] = Math.floor(Date.now() / 1000);
       const tmp = e.file + ".acftmp";
       writeFileSync(tmp, JSON.stringify(out, null, 4) + "\n");
@@ -185,10 +182,10 @@ export function commit(
   details: Record<string, unknown>,
 ): CommitResult {
   if (dryRun) {
-    const preview = entries.map((e) => ({ file: e.file, group: stripFileKey(e.group) }));
+    const preview = entries.map((e) => ({ file: e.file, group: stripSynthetic(e.group) }));
     return { content: [{ type: "text", text: "DRY RUN — no files written.\n" + summary }], details: { ...details, dryRun: true, files: entries.map((e) => e.file), preview } };
   }
-  writeGroupFilesAtomic(entries);
+  writeAcfFilesAtomic(entries);
   invalidateIndex();
   return { content: [{ type: "text", text: summary }], details: { ...details, writtenFiles: entries.map((e) => e.file) } };
 }
@@ -279,6 +276,22 @@ export function resolveOneGroup(idx: LoadedIndex, groupKey: string): { group: Ac
     };
   }
   return { group: matches[0]! };
+}
+
+// resolveOneUiObject — same ambiguity guard as resolveOneGroup, for post types,
+// taxonomies and options pages.
+export function resolveOneUiObject(idx: LoadedIndex, key: string): { object: AcfUiObject } | { error: string } {
+  const matches = idx.uiObjects.filter((o) => o.key === key);
+  if (matches.length === 0) return { error: `UI object ${key} not found (post types, taxonomies and options pages are keyed post_type_/taxonomy_/ui_options_page_)` };
+  if (matches.length > 1) {
+    return {
+      error:
+        `${key} is ambiguous — the same key exists in ${matches.length} files:\n  ` +
+        matches.map((m) => m._file).join("\n  ") +
+        `\nPass an explicit projectRoot that points at a single acf-json dir, or remove the duplicate copy before mutating.`,
+    };
+  }
+  return { object: matches[0]! };
 }
 
 // ---------------------------------------------------------------------------

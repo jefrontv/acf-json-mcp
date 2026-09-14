@@ -3,11 +3,9 @@
 // field/layout/group mutations, reference graph, WP DB sync) as MCP tools.
 //
 // Transport: stdio (the Claude Code / Cursor / OMP MCP default).
-//
 // The engine (engine.ts) and sync logic (sync.ts) are pure TS with node-builtin
-// deps only — copied verbatim from the oh-my-pi acf-json extension and reused
-// unchanged. This file is the thin MCP adapter: it owns the per-project index
-// cache, atomic writes, and the 22 tool handlers.
+// deps only. This file is the thin MCP adapter: it owns the per-project index
+// cache, atomic writes, and the 28 tool handlers.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

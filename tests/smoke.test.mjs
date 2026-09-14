@@ -1,10 +1,7 @@
 // Smoke test: list tools, acf_list_groups, acf_validate, acf_generate_key.
 // Exits 0 on success.
 
-import { resolve } from "node:path";
-import { startHarness, assert } from "./harness.mjs";
-
-const CORPUS = resolve(process.env.HOME ?? "", "Documents/Sites/efront-boilerplate-wordpress-theme");
+import { startHarness, assert, CORPUS } from "./harness.mjs";
 
 async function main() {
   const h = startHarness(CORPUS);
@@ -27,7 +24,7 @@ async function main() {
   const count = toolNames && typeof toolNames === "object" && "tools" in toolNames
     ? toolNames.tools.length
     : 0;
-  assert(count === 22, `expected 22 tools, got ${count}`);
+  assert(count === 28, `expected 28 tools, got ${count}`);
   console.log(`tools/list: ${count} tools OK`);
 
   const groupsText = h.get(3)?.result?.content?.[0]?.text ?? "";

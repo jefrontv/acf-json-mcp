@@ -21293,6 +21293,9 @@ var FIELD_TEMPLATES = {
   }
 };
 var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "vendor", "dist", ".cache", ".next"]);
+var GROUP_FILE_RE = /^group_.*\.json$/;
+var UI_FILE_RE = /^(post_type|taxonomy|ui_options_page)_.*\.json$/;
+var ACF_FILE_RE = /^(group|post_type|taxonomy|ui_options_page)_.*\.json$/;
 function findAcfJsonDirs(root) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
@@ -21307,17 +21310,12 @@ function findAcfJsonDirs(root) {
     } catch {
       return;
     }
-    const isAcfJson = basename(dir) === "acf-json";
-    if (isAcfJson) {
-      const hasGroup = entries.some((e) => /^group_.*\.json$/.test(e));
-      if (hasGroup) {
-        const norm = dir;
-        if (!seen.has(norm)) {
-          seen.add(norm);
-          out.push(norm);
-        }
-        return;
+    if (basename(dir) === "acf-json") {
+      if (!seen.has(dir)) {
+        seen.add(dir);
+        out.push(dir);
       }
+      return;
     }
     for (const e of entries) {
       if (SKIP_DIRS.has(e)) continue;
@@ -21350,6 +21348,30 @@ function parseGroup(raw, file) {
   if (!("show_in_rest" in g) || typeof g["show_in_rest"] !== "number") g["show_in_rest"] = 0;
   return g;
 }
+var UI_KEY_PREFIX = {
+  post_type: "post_type",
+  taxonomy: "taxonomy",
+  options_page: "ui_options_page"
+};
+function uiKindOf(nameOrKey) {
+  if (nameOrKey.startsWith("ui_options_page_")) return "options_page";
+  if (nameOrKey.startsWith("post_type_")) return "post_type";
+  if (nameOrKey.startsWith("taxonomy_")) return "taxonomy";
+  return null;
+}
+function parseUiObject(raw, file, kind) {
+  if (!isRecord(raw)) return { error: "top-level JSON is not an object" };
+  if (!hasStringProp(raw, "key")) return { error: "missing/invalid top-level key" };
+  const o = { ...raw };
+  const key = typeof o["key"] === "string" ? o["key"] : "";
+  if (uiKindOf(key) !== kind) return { error: `key ${key} does not match the ${UI_KEY_PREFIX[kind]}_ prefix of its filename` };
+  if (!hasStringProp(o, "title")) o["title"] = "";
+  if (!hasBoolProp(o, "active")) o["active"] = true;
+  if (!hasNumProp(o, "menu_order")) o["menu_order"] = 0;
+  o["_kind"] = kind;
+  o["_file"] = file;
+  return { object: o };
+}
 function collectKeys(node, into) {
   if (!isRecord(node)) return;
   if ("key" in node && typeof node["key"] === "string" && node["key"].length > 0) {
@@ -21371,7 +21393,9 @@ function collectKeys(node, into) {
 function loadIndex(root) {
   const dirs = findAcfJsonDirs(root);
   const groups = [];
+  const uiObjects = [];
   const dirToGroups = /* @__PURE__ */ new Map();
+  const dirToUiObjects = /* @__PURE__ */ new Map();
   const allKeys = /* @__PURE__ */ new Set();
   const errors = [];
   for (const dir of dirs) {
@@ -21382,24 +21406,12 @@ function loadIndex(root) {
       errors.push({ file: dir, error: `readdir failed: ${String(e)}` });
       continue;
     }
-    const groupFiles = entries.filter((e) => /^group_.*\.json$/.test(e)).sort();
+    const groupFiles = entries.filter((e) => GROUP_FILE_RE.test(e)).sort();
     const bucket = [];
     for (const gf of groupFiles) {
       const file = join(dir, gf);
-      let text;
-      try {
-        text = readFileSync(file, "utf8");
-      } catch (e) {
-        errors.push({ file, error: `read failed: ${String(e)}` });
-        continue;
-      }
-      let raw;
-      try {
-        raw = JSON.parse(text);
-      } catch (e) {
-        errors.push({ file, error: `JSON.parse failed: ${String(e)}` });
-        continue;
-      }
+      const raw = readJson(file, errors);
+      if (raw === void 0) continue;
       const parsed = parseGroup(raw, file);
       if ("error" in parsed) {
         errors.push({ file, error: parsed.error });
@@ -21409,9 +21421,42 @@ function loadIndex(root) {
       groups.push(parsed);
     }
     if (bucket.length) dirToGroups.set(dir, bucket);
+    const uiFiles = entries.filter((e) => UI_FILE_RE.test(e)).sort();
+    const uiBucket = [];
+    for (const uf of uiFiles) {
+      const file = join(dir, uf);
+      const kind = uiKindOf(uf);
+      if (!kind) continue;
+      const raw = readJson(file, errors);
+      if (raw === void 0) continue;
+      const parsed = parseUiObject(raw, file, kind);
+      if ("error" in parsed) {
+        errors.push({ file, error: parsed.error });
+        continue;
+      }
+      uiBucket.push(parsed.object);
+      uiObjects.push(parsed.object);
+    }
+    if (uiBucket.length) dirToUiObjects.set(dir, uiBucket);
   }
   for (const g of groups) collectKeys(g, allKeys);
-  return { groups, dirToGroups, allKeys, errors };
+  for (const o of uiObjects) allKeys.add(o.key);
+  return { groups, uiObjects, dirToGroups, dirToUiObjects, allKeys, errors };
+}
+function readJson(file, errors) {
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    errors.push({ file, error: `read failed: ${String(e)}` });
+    return void 0;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    errors.push({ file, error: `JSON.parse failed: ${String(e)}` });
+    return void 0;
+  }
 }
 function uniqid13() {
   const time8 = Date.now().toString(16).slice(-8).padStart(8, "0");
@@ -22602,6 +22647,511 @@ function outline(index, groupKey) {
   }
   return lines.join("\n");
 }
+var WP_RESERVED_TERMS = {
+  action: true,
+  attachment: true,
+  attachment_id: true,
+  author: true,
+  author_name: true,
+  calendar: true,
+  cat: true,
+  category: true,
+  category__and: true,
+  category__in: true,
+  category__not_in: true,
+  category_name: true,
+  comments_per_page: true,
+  comments_popup: true,
+  custom: true,
+  customize_messenger_channel: true,
+  customized: true,
+  cpage: true,
+  day: true,
+  debug: true,
+  embed: true,
+  error: true,
+  exact: true,
+  feed: true,
+  fields: true,
+  hour: true,
+  link: true,
+  link_category: true,
+  m: true,
+  minute: true,
+  monthnum: true,
+  more: true,
+  name: true,
+  nav_menu: true,
+  nonce: true,
+  nopaging: true,
+  offset: true,
+  order: true,
+  orderby: true,
+  p: true,
+  page: true,
+  page_id: true,
+  paged: true,
+  pagename: true,
+  pb: true,
+  perm: true,
+  post: true,
+  post__in: true,
+  post__not_in: true,
+  post_format: true,
+  post_mime_type: true,
+  post_status: true,
+  post_tag: true,
+  post_type: true,
+  posts: true,
+  posts_per_archive_page: true,
+  posts_per_page: true,
+  preview: true,
+  robots: true,
+  s: true,
+  search: true,
+  second: true,
+  sentence: true,
+  showposts: true,
+  static: true,
+  status: true,
+  subpost: true,
+  subpost_id: true,
+  tag: true,
+  tag__and: true,
+  tag__in: true,
+  tag__not_in: true,
+  tag_id: true,
+  tag_slug__and: true,
+  tag_slug__in: true,
+  taxonomy: true,
+  tb: true,
+  term: true,
+  terms: true,
+  theme: true,
+  themes: true,
+  title: true,
+  type: true,
+  types: true,
+  w: true,
+  withcomments: true,
+  withoutcomments: true,
+  year: true
+};
+var WP_BUILTIN_POST_TYPES = {
+  post: true,
+  page: true,
+  attachment: true,
+  revision: true,
+  nav_menu_item: true,
+  wp_block: true,
+  wp_template: true,
+  wp_template_part: true,
+  wp_navigation: true
+};
+var SLUG_RE = /^[a-z0-9_-]+$/;
+function slugify(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function postTypeLabels(singular, plural) {
+  const s = singular;
+  const p = plural;
+  const sl = singular.toLowerCase();
+  const pl = plural.toLowerCase();
+  return {
+    name: p,
+    singular_name: s,
+    menu_name: p,
+    all_items: `All ${p}`,
+    edit_item: `Edit ${s}`,
+    view_item: `View ${s}`,
+    view_items: `View ${p}`,
+    add_new_item: `Add New ${s}`,
+    add_new: `Add New ${s}`,
+    new_item: `New ${s}`,
+    parent_item_colon: `Parent ${s}:`,
+    search_items: `Search ${p}`,
+    not_found: `No ${pl} found`,
+    not_found_in_trash: `No ${pl} found in Trash`,
+    archives: `${s} Archives`,
+    attributes: `${s} Attributes`,
+    featured_image: "",
+    set_featured_image: "",
+    remove_featured_image: "",
+    use_featured_image: "",
+    insert_into_item: `Insert into ${sl}`,
+    uploaded_to_this_item: `Uploaded to this ${sl}`,
+    filter_items_list: `Filter ${pl} list`,
+    filter_by_date: `Filter ${pl} by date`,
+    items_list_navigation: `${p} list navigation`,
+    items_list: `${p} list`,
+    item_published: `${s} published.`,
+    item_published_privately: `${s} published privately.`,
+    item_reverted_to_draft: `${s} reverted to draft.`,
+    item_scheduled: `${s} scheduled.`,
+    item_updated: `${s} updated.`,
+    item_link: `${s} Link`,
+    item_link_description: `A link to a ${sl}.`
+  };
+}
+function taxonomyLabels(singular, plural, hierarchical) {
+  const s = singular;
+  const p = plural;
+  const sl = singular.toLowerCase();
+  const pl = plural.toLowerCase();
+  const head = {
+    name: p,
+    singular_name: s,
+    menu_name: p,
+    all_items: `All ${p}`,
+    edit_item: `Edit ${s}`,
+    view_item: `View ${s}`,
+    update_item: `Update ${s}`,
+    add_new_item: `Add New ${s}`,
+    new_item_name: `New ${s} Name`
+  };
+  const tail = {
+    items_list_navigation: `${p} list navigation`,
+    items_list: `${p} list`,
+    back_to_items: `\u2190 Go to ${pl}`,
+    item_link: `${s} Link`,
+    item_link_description: `A link to a ${sl}`
+  };
+  if (hierarchical) {
+    return {
+      ...head,
+      parent_item: "",
+      parent_item_colon: "",
+      search_items: `Search ${p}`,
+      most_used: "",
+      not_found: `No ${pl} found`,
+      no_terms: `No ${pl}`,
+      name_field_description: "",
+      slug_field_description: "",
+      parent_field_description: "",
+      desc_field_description: "",
+      filter_by_item: "",
+      ...tail
+    };
+  }
+  return {
+    ...head,
+    search_items: `Search ${p}`,
+    popular_items: `Popular ${p}`,
+    separate_items_with_commas: `Separate ${pl} with commas`,
+    add_or_remove_items: `Add or remove ${pl}`,
+    choose_from_most_used: `Choose from the most used ${pl}`,
+    most_used: "",
+    not_found: `No ${pl} found`,
+    no_terms: `No ${pl}`,
+    name_field_description: "",
+    slug_field_description: "",
+    desc_field_description: "",
+    ...tail
+  };
+}
+function checkSlug(kind, slug, maxLen, index) {
+  const errors = [];
+  const label = kind === "post_type" ? "post type key" : "taxonomy key";
+  if (slug.length === 0) {
+    errors.push(`${label} is required`);
+    return errors;
+  }
+  if (slug.length > maxLen) errors.push(`${label} "${slug}" must be under ${maxLen} characters`);
+  if (!SLUG_RE.test(slug)) errors.push(`${label} "${slug}" must contain only lowercase alphanumerics, underscores or dashes`);
+  if (slug in WP_RESERVED_TERMS) errors.push(`${label} "${slug}" is a WordPress reserved term`);
+  const field = kind === "post_type" ? "post_type" : "taxonomy";
+  const uiKind = kind === "post_type" ? "post_type" : "taxonomy";
+  for (const o of index.uiObjects) {
+    if (o._kind === uiKind && o[field] === slug) {
+      errors.push(`${label} "${slug}" is already used by ${o.key} (${o._file})`);
+      break;
+    }
+  }
+  return errors;
+}
+function finishUiObject(obj, overrides, kind, key, errors) {
+  if (overrides) {
+    for (const k of ["key", "_kind", "_file"]) {
+      if (k in overrides) errors.push(`overrides may not set ${k}`);
+    }
+    if (errors.length === 0) deepMergeInto(obj, overrides);
+  }
+  obj["_kind"] = kind;
+  obj["_file"] = "";
+  return { object: obj, key, errors };
+}
+function buildPostType(index, input) {
+  const errors = checkSlug("post_type", input.postType, 20, index);
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  const key = generateKey("post_type", index.allKeys);
+  const singular = input.singular ?? input.title;
+  const plural = input.plural ?? input.title;
+  const rewriteSlug = input.rewriteSlug ?? "";
+  const hasArchive = input.hasArchive ?? false;
+  const obj = {
+    key,
+    title: input.title,
+    menu_order: input.menuOrder ?? 0,
+    active: input.active ?? true,
+    post_type: input.postType,
+    advanced_configuration: rewriteSlug.length > 0 || hasArchive,
+    import_source: "",
+    import_date: "",
+    allow_ai_access: false,
+    ai_description: "",
+    labels: { ...postTypeLabels(singular, plural), ...input.labels ?? {} },
+    description: input.description ?? "",
+    public: input.isPublic ?? true,
+    hierarchical: input.hierarchical ?? false,
+    exclude_from_search: false,
+    publicly_queryable: true,
+    show_ui: true,
+    show_in_menu: true,
+    admin_menu_parent: "",
+    show_in_admin_bar: true,
+    show_in_nav_menus: true,
+    show_in_rest: input.showInRest ?? true,
+    rest_base: "",
+    rest_namespace: "wp/v2",
+    rest_controller_class: "WP_REST_Posts_Controller",
+    menu_position: typeof input.menuPosition === "number" ? input.menuPosition : "",
+    menu_icon: input.menuIcon ? { type: "dashicons", value: input.menuIcon } : "",
+    rename_capabilities: false,
+    singular_capability_name: "post",
+    plural_capability_name: "posts",
+    supports: input.supports ?? ["title", "editor", "thumbnail", "custom-fields"],
+    taxonomies: input.taxonomies ?? [],
+    has_archive: hasArchive,
+    has_archive_slug: input.archiveSlug ?? "",
+    rewrite: rewriteSlug.length > 0 ? { permalink_rewrite: "custom_permalink", slug: rewriteSlug, with_front: "1", feeds: "0", pages: "1" } : { permalink_rewrite: "post_type_key", with_front: "1", feeds: "0", pages: "1" },
+    query_var: "post_type_key",
+    query_var_name: "",
+    can_export: true,
+    delete_with_user: false,
+    register_meta_box_cb: "",
+    enter_title_here: ""
+  };
+  return finishUiObject(obj, input.overrides, "post_type", key, errors);
+}
+function buildTaxonomy(index, input) {
+  const errors = checkSlug("taxonomy", input.taxonomy, 32, index);
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  if (!Array.isArray(input.objectType) || input.objectType.length === 0) {
+    errors.push("objectType is required \u2014 a taxonomy must attach to at least one post type");
+  }
+  const key = generateKey("taxonomy", index.allKeys);
+  const singular = input.singular ?? input.title;
+  const plural = input.plural ?? input.title;
+  const hierarchical = input.hierarchical ?? false;
+  const rewriteSlug = input.rewriteSlug ?? "";
+  const obj = {
+    key,
+    title: input.title,
+    menu_order: input.menuOrder ?? 0,
+    active: input.active ?? true,
+    taxonomy: input.taxonomy,
+    object_type: Array.isArray(input.objectType) ? [...input.objectType] : [],
+    advanced_configuration: rewriteSlug.length > 0,
+    import_source: "",
+    import_date: "",
+    labels: { ...taxonomyLabels(singular, plural, hierarchical), ...input.labels ?? {} },
+    description: input.description ?? "",
+    capabilities: {
+      manage_terms: "manage_categories",
+      edit_terms: "manage_categories",
+      delete_terms: "manage_categories",
+      assign_terms: "edit_posts"
+    },
+    public: input.isPublic ?? true,
+    publicly_queryable: true,
+    hierarchical,
+    show_ui: true,
+    show_in_menu: true,
+    show_in_nav_menus: true,
+    show_in_rest: input.showInRest ?? true,
+    rest_base: "",
+    rest_namespace: "wp/v2",
+    rest_controller_class: "WP_REST_Terms_Controller",
+    show_tagcloud: true,
+    show_in_quick_edit: true,
+    show_admin_column: input.showAdminColumn ?? false,
+    rewrite: rewriteSlug.length > 0 ? { permalink_rewrite: "custom_permalink", slug: rewriteSlug, with_front: "1", rewrite_hierarchical: "0" } : { permalink_rewrite: "taxonomy_key", with_front: "1", rewrite_hierarchical: "0" },
+    query_var: "taxonomy_key",
+    query_var_name: "",
+    default_term: { default_term_enabled: false },
+    sort: false,
+    meta_box: "default",
+    meta_box_cb: "",
+    meta_box_sanitize_cb: "",
+    allow_ai_access: false,
+    ai_description: ""
+  };
+  return finishUiObject(obj, input.overrides, "taxonomy", key, errors);
+}
+function buildOptionsPage(index, input) {
+  const errors = [];
+  if (typeof input.title !== "string" || input.title.length === 0) errors.push("title is required");
+  const menuSlug = input.menuSlug && input.menuSlug.length > 0 ? input.menuSlug : slugify(input.title ?? "");
+  if (menuSlug.length === 0) errors.push("menuSlug is required (title produced an empty slug)");
+  for (const o of index.uiObjects) {
+    if (o._kind === "options_page" && o["menu_slug"] === menuSlug) {
+      errors.push(`menu_slug "${menuSlug}" is already used by ${o.key} (${o._file})`);
+      break;
+    }
+  }
+  const dataStorage = input.dataStorage ?? "options";
+  if (dataStorage === "post_id" && (input.postId ?? "").length === 0) {
+    errors.push('dataStorage "post_id" requires postId');
+  }
+  const key = generateKey("ui_options_page", index.allKeys);
+  const parentSlug = input.parentSlug ?? "";
+  const obj = {
+    key,
+    title: input.title,
+    active: input.active ?? true,
+    menu_order: input.menuOrder ?? 0,
+    page_title: input.pageTitle ?? input.title,
+    menu_slug: menuSlug,
+    parent_slug: parentSlug,
+    advanced_configuration: Boolean(input.capability || input.iconUrl || input.position || input.redirect || input.description),
+    icon_url: input.iconUrl ?? "",
+    menu_title: input.menuTitle ?? "",
+    position: input.position ?? "",
+    redirect: input.redirect ?? false,
+    description: input.description ?? "",
+    menu_icon: [],
+    update_button: input.updateButton ?? "Update",
+    updated_message: input.updatedMessage ?? "Options Updated",
+    capability: input.capability ?? "edit_posts",
+    data_storage: dataStorage,
+    post_id: input.postId ?? "",
+    autoload: input.autoload ?? false
+  };
+  return finishUiObject(obj, input.overrides, "options_page", key, errors);
+}
+function updateUiObject(index, key, patch) {
+  const errors = [];
+  const matches = index.uiObjects.filter((o) => o.key === key);
+  const target = matches[0];
+  if (!target) return { updated: {}, errors: [`UI object ${key} not found`] };
+  for (const k of ["key", "_kind", "_file"]) {
+    if (k in patch) errors.push(`patch may not change ${k}`);
+  }
+  if (errors.length > 0) return { updated: target, errors };
+  const next = JSON.parse(JSON.stringify(stripSynthetic(target)));
+  deepMergeInto(next, patch);
+  next["_kind"] = target._kind;
+  next["_file"] = target._file;
+  return { updated: next, errors };
+}
+function stripSynthetic(o) {
+  const out = {};
+  for (const k of Object.keys(o)) {
+    if (k === "_file" || k === "_kind") continue;
+    out[k] = o[k];
+  }
+  return out;
+}
+function outlineUiObjects(index, kind) {
+  const objs = kind ? index.uiObjects.filter((o) => o._kind === kind) : index.uiObjects;
+  const lines = objs.map((o) => {
+    const slug = o._kind === "post_type" ? `post_type=${String(o["post_type"] ?? "")}` : o._kind === "taxonomy" ? `taxonomy=${String(o["taxonomy"] ?? "")} object_type=[${(Array.isArray(o["object_type"]) ? o["object_type"] : []).join(",")}]` : `menu_slug=${String(o["menu_slug"] ?? "")} parent=${String(o["parent_slug"] ?? "") || "(top level)"}`;
+    return `${o._kind}  ${o.key}  "${o.title}"  ${slug}  active=${o.active}  ${o._file}`;
+  });
+  return lines.join("\n");
+}
+function validateUiObjects(index, key) {
+  const findings = [];
+  const objs = key ? index.uiObjects.filter((o) => o.key === key) : index.uiObjects;
+  const keyFiles = /* @__PURE__ */ new Map();
+  for (const o of index.uiObjects) {
+    const set = keyFiles.get(o.key) ?? /* @__PURE__ */ new Set();
+    set.add(o._file);
+    keyFiles.set(o.key, set);
+  }
+  for (const [k, files] of keyFiles) {
+    if (files.size > 1) {
+      findings.push({ severity: "error", file: [...files].sort().join(", "), path: "(global)", message: `duplicate key ${k} appears in ${files.size} files`, fix: "delete the stale copy or regenerate one key" });
+    }
+  }
+  const acfPostTypes = /* @__PURE__ */ new Set();
+  for (const o of index.uiObjects) {
+    if (o._kind === "post_type" && typeof o["post_type"] === "string") acfPostTypes.add(o["post_type"]);
+  }
+  for (const o of objs) {
+    const file = o._file;
+    const prefix = UI_KEY_PREFIX[o._kind];
+    if (!new RegExp(`^${prefix}_[0-9a-fA-F]{12,13}$`).test(o.key)) {
+      findings.push({ severity: "warning", file, path: "key", message: `key ${o.key} is not ${prefix}_<12-13hex> uniqid format; ACF still resolves it by exact key`, fix: `optional: regenerate with generateKey('${prefix}', \u2026)` });
+    }
+    const fn = basename(file, ".json");
+    if (fn !== o.key) {
+      findings.push({ severity: "warning", file, path: "key", message: `key ${o.key} does not match filename ${fn}.json`, fix: "rename the file to <key>.json so ACF's sync screen matches it" });
+    }
+    if (typeof o.title !== "string" || o.title.length === 0) {
+      findings.push({ severity: "error", file, path: "title", message: "title is empty", fix: "set a non-empty title" });
+    }
+    if (o._kind === "post_type") {
+      const slug = typeof o["post_type"] === "string" ? o["post_type"] : "";
+      findings.push(...slugFindings(file, "post_type", slug, 20));
+      if (!Array.isArray(o["supports"]) && o["supports"] !== false) {
+        findings.push({ severity: "warning", file, path: "supports", message: "supports is not an array", fix: 'set supports to an array, e.g. ["title","editor","thumbnail"]' });
+      }
+      if (o["has_archive"] === true && typeof o["has_archive_slug"] === "string" && o["has_archive_slug"].length === 0) {
+        findings.push({ severity: "info", file, path: "has_archive_slug", message: "archive enabled with no archive slug \u2014 WordPress falls back to the post type key", fix: "set has_archive_slug to the desired archive path" });
+      }
+    }
+    if (o._kind === "taxonomy") {
+      const slug = typeof o["taxonomy"] === "string" ? o["taxonomy"] : "";
+      findings.push(...slugFindings(file, "taxonomy", slug, 32));
+      const objectTypes = Array.isArray(o["object_type"]) ? o["object_type"] : [];
+      if (objectTypes.length === 0) {
+        findings.push({ severity: "warning", file, path: "object_type", message: "taxonomy is attached to no post type", fix: "add at least one post type key to object_type" });
+      }
+      for (const [i, pt] of objectTypes.entries()) {
+        if (typeof pt !== "string") {
+          findings.push({ severity: "error", file, path: `object_type[${i}]`, message: "object_type entry is not a string", fix: "use post type keys" });
+          continue;
+        }
+        if (!acfPostTypes.has(pt) && !(pt in WP_BUILTIN_POST_TYPES)) {
+          findings.push({ severity: "info", file, path: `object_type[${i}]`, message: `post type "${pt}" is not defined by any ACF post type in this project (it may be registered in PHP)`, fix: "confirm the post type key or create it with acf_create_post_type" });
+        }
+      }
+    }
+    if (o._kind === "options_page") {
+      const menuSlug = typeof o["menu_slug"] === "string" ? o["menu_slug"] : "";
+      if (menuSlug.length === 0) {
+        findings.push({ severity: "error", file, path: "menu_slug", message: "menu_slug is empty", fix: "set a unique menu_slug \u2014 location rules reference it" });
+      } else {
+        const clash = index.uiObjects.find((x) => x._kind === "options_page" && x.key !== o.key && x["menu_slug"] === menuSlug);
+        if (clash) {
+          findings.push({ severity: "error", file, path: "menu_slug", message: `menu_slug "${menuSlug}" is also used by ${clash.key} (${clash._file})`, fix: "make each options page menu_slug unique" });
+        }
+      }
+      const storage = o["data_storage"];
+      if (storage !== "options" && storage !== "post_id") {
+        findings.push({ severity: "error", file, path: "data_storage", message: `data_storage "${String(storage)}" is invalid`, fix: 'use "options" or "post_id"' });
+      } else if (storage === "post_id" && (typeof o["post_id"] !== "string" || o["post_id"].length === 0)) {
+        findings.push({ severity: "error", file, path: "post_id", message: 'data_storage is "post_id" but post_id is empty', fix: "set post_id to the post storing these options" });
+      }
+      if (typeof o["page_title"] !== "string" || o["page_title"].length === 0) {
+        findings.push({ severity: "warning", file, path: "page_title", message: "page_title is empty \u2014 the admin screen renders with no heading", fix: "set page_title" });
+      }
+    }
+  }
+  return findings;
+}
+function slugFindings(file, field, slug, maxLen) {
+  const out = [];
+  if (slug.length === 0) {
+    out.push({ severity: "error", file, path: field, message: `${field} key is empty`, fix: `set ${field} to the register_${field}() key` });
+    return out;
+  }
+  if (slug.length > maxLen) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" exceeds ${maxLen} characters`, fix: `shorten the ${field} key` });
+  if (!SLUG_RE.test(slug)) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" has characters outside [a-z0-9_-]`, fix: "use lowercase alphanumerics, underscores or dashes" });
+  if (slug in WP_RESERVED_TERMS) out.push({ severity: "error", file, path: field, message: `${field} key "${slug}" is a WordPress reserved term`, fix: "pick a non-reserved key (prefix it, e.g. cpt_/ct_)" });
+  return out;
+}
 
 // src/sync.ts
 import { spawnSync } from "node:child_process";
@@ -22677,31 +23227,70 @@ function parsePerGroup(stdout) {
   }
   return out;
 }
-function buildEvalPhp(acfJsonAbsDir) {
+var IMPORTERS = [
+  { pattern: "group_*.json", fn: "acf_import_field_group", ui: false },
+  { pattern: "post_type_*.json", fn: "acf_import_post_type", ui: true },
+  { pattern: "taxonomy_*.json", fn: "acf_import_taxonomy", ui: true },
+  { pattern: "ui_options_page_*.json", fn: "acf_import_ui_options_page", ui: true }
+];
+function buildEvalPhp(acfJsonAbsDir, scope) {
+  const targets = IMPORTERS.filter((t) => scope === "all" || t.ui);
+  const phpTargets = targets.map((t) => `[${JSON.stringify(t.pattern)}, ${JSON.stringify(t.fn)}]`).join(", ");
   return `
 <?php
 $dir = ${JSON.stringify(acfJsonAbsDir)};
-$files = glob($dir . '/group_*.json');
-if (!is_array($files)) { echo json_encode(['error' => 'glob failed']); exit; }
-foreach ($files as $f) {
-  try {
-    $raw = file_get_contents($f);
-    if ($raw === false) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => 'read failed']) . "
+$targets = [${phpTargets}];
+foreach ($targets as $target) {
+  $files = glob($dir . '/' . $target[0]);
+  $fn = $target[1];
+  if (!is_array($files)) { continue; }
+  foreach ($files as $f) {
+    try {
+      $raw = file_get_contents($f);
+      if ($raw === false) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => 'read failed']) . "
 "; continue; }
-    $group = json_decode($raw, true);
-    if (!is_array($group)) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => 'json decode failed']) . "
+      $data = json_decode($raw, true);
+      if (!is_array($data)) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => 'json decode failed']) . "
 "; continue; }
-    if (!function_exists('acf_import_field_group')) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => 'acf_import_field_group missing']) . "
+      if (!function_exists($fn)) { echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => $fn . ' missing \u2014 ACF version too old or ACF PRO inactive']) . "
 "; continue; }
-    acf_import_field_group($group);
-    echo json_encode(['file' => basename($f), 'status' => 'imported']) . "
+      $fn($data);
+      echo json_encode(['file' => basename($f), 'status' => 'imported']) . "
 ";
-  } catch (Throwable $e) {
-    echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => $e->getMessage()]) . "
+    } catch (Throwable $e) {
+      echo json_encode(['file' => basename($f), 'status' => 'error', 'error' => $e->getMessage()]) . "
 ";
+    }
   }
 }
 `.trim();
+}
+function parseEvalLines(stdout) {
+  const out = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.trim().length === 0) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord2(obj)) continue;
+    if (typeof obj["file"] !== "string") continue;
+    const file = obj["file"];
+    const statusStr = typeof obj["status"] === "string" ? obj["status"] : "error";
+    const mapped = statusStr === "imported" || statusStr === "updated" || statusStr === "skipped" ? statusStr : "error";
+    const err = typeof obj["error"] === "string" ? obj["error"] : void 0;
+    out.push({ key: file, status: mapped, error: err });
+  }
+  return out;
+}
+function hasUiObjectFiles(acfJsonDir) {
+  try {
+    return readdirSync2(acfJsonDir).some((e) => /^(post_type|taxonomy|ui_options_page)_.*\.json$/.test(e));
+  } catch {
+    return false;
+  }
 }
 var SKIP_DIRS2 = /* @__PURE__ */ new Set(["node_modules", ".git", "vendor", "dist", ".cache", ".next", ".svelte-kit", "build"]);
 function findAcfJsonDir(root) {
@@ -22762,44 +23351,43 @@ async function runSync(projectRoot, opts) {
   }
   const status = runWp(wpBin, ["acf", "json", "status"], wpRoot);
   const acfCmdKnown = status.status === 0;
+  const hasUi = hasUiObjectFiles(acfDir);
   if (acfCmdKnown) {
     const syncArgs = buildWpCommand({ dryRun, key });
     const r2 = runWp(wpBin, syncArgs, wpRoot);
     const perGroup2 = parsePerGroup(r2.stdout);
-    const ok3 = r2.status === 0;
+    let ok3 = r2.status === 0;
+    let uiNote = "";
+    let uiStdout = "";
+    let uiStderr = "";
+    if (hasUi && !dryRun) {
+      const rui = runWp(wpBin, ["eval", buildEvalPhp(acfDir, "ui")], wpRoot);
+      const uiResults = parseEvalLines(rui.stdout);
+      perGroup2.push(...uiResults);
+      uiStdout = rui.stdout;
+      uiStderr = rui.stderr;
+      if (rui.status !== 0) ok3 = false;
+      uiNote = ` Imported ${uiResults.length} post type/taxonomy/options page file(s) via wp eval (wp acf json sync covers field groups only).`;
+    } else if (hasUi && dryRun) {
+      uiNote = " Post type/taxonomy/options page files were NOT touched \u2014 the eval importer they need has no dry-run.";
+    }
     return {
       ok: ok3,
       method: "wp_acf_json_sync",
-      message: ok3 ? `Synced acf-json/*.json into the database via wp acf json sync${dryRun ? " (dry-run)" : ""}.` : `wp acf json sync exited non-zero (status=${r2.status}).`,
+      message: ok3 ? `Synced acf-json/*.json into the database via wp acf json sync${dryRun ? " (dry-run)" : ""}.${uiNote}` : `wp acf json sync exited non-zero (status=${r2.status}).${uiNote}`,
       perGroup: perGroup2.length > 0 ? perGroup2 : void 0,
-      rawStdout: r2.stdout,
-      rawStderr: r2.stderr
+      rawStdout: uiStdout ? r2.stdout + "\n" + uiStdout : r2.stdout,
+      rawStderr: uiStderr ? r2.stderr + "\n" + uiStderr : r2.stderr
     };
   }
-  const php = buildEvalPhp(acfDir);
+  const php = buildEvalPhp(acfDir, "all");
   const r = runWp(wpBin, ["eval", php], wpRoot);
-  const perGroup = [];
-  for (const line of r.stdout.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    let obj;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isRecord2(obj)) continue;
-    if (typeof obj["file"] !== "string") continue;
-    const file = obj["file"];
-    const statusStr = typeof obj["status"] === "string" ? obj["status"] : "error";
-    const mapped = statusStr === "imported" || statusStr === "updated" || statusStr === "skipped" ? statusStr : "error";
-    const err = typeof obj["error"] === "string" ? obj["error"] : void 0;
-    perGroup.push({ key: file, status: mapped, error: err });
-  }
+  const perGroup = parseEvalLines(r.stdout);
   const ok2 = r.status === 0;
   return {
     ok: ok2,
     method: "wp_eval_fallback",
-    message: ok2 ? `Imported acf-json/group_*.json via wp eval (acf_import_field_group fallback)${dryRun ? " \u2014 note: dry-run is ignored by the eval fallback" : ""}.` : `wp eval fallback exited non-zero (status=${r.status}). ACF PRO wp-cli command was not available.`,
+    message: ok2 ? `Imported acf-json/*.json via wp eval (acf_import_field_group / acf_import_post_type / acf_import_taxonomy / acf_import_ui_options_page)${dryRun ? " \u2014 note: dry-run is ignored by the eval fallback" : ""}.` : `wp eval fallback exited non-zero (status=${r.status}). ACF PRO wp-cli command was not available.`,
     perGroup: perGroup.length > 0 ? perGroup : void 0,
     rawStdout: r.stdout,
     rawStderr: r.stderr
@@ -22814,10 +23402,11 @@ var cachedRoot = null;
 var cachedSig = null;
 function indexSignature(idx) {
   const parts = [];
-  for (const dir of [...idx.dirToGroups.keys()].sort()) {
+  const dirs = /* @__PURE__ */ new Set([...idx.dirToGroups.keys(), ...idx.dirToUiObjects.keys()]);
+  for (const dir of [...dirs].sort()) {
     let names;
     try {
-      names = readdirSync3(dir).filter((e) => /^group_.*\.json$/.test(e)).sort();
+      names = readdirSync3(dir).filter((e) => ACF_FILE_RE.test(e)).sort();
     } catch {
       parts.push(`${dir}\0ERR`);
       continue;
@@ -22895,22 +23484,14 @@ function formatSyncResult(res) {
   }
   return lines.join("\n");
 }
-function stripFileKey(g) {
-  const out = {};
-  for (const k of Object.keys(g)) {
-    if (k === "_file") continue;
-    out[k] = g[k];
-  }
-  return out;
+function writeAcfFile(file, record2) {
+  writeAcfFilesAtomic([{ file, group: record2 }]);
 }
-function writeGroupFile(file, group) {
-  writeGroupFilesAtomic([{ file, group }]);
-}
-function writeGroupFilesAtomic(entries) {
+function writeAcfFilesAtomic(entries) {
   const tmps = [];
   try {
     for (const e of entries) {
-      const out = stripFileKey(e.group);
+      const out = stripSynthetic(e.group);
       out["modified"] = Math.floor(Date.now() / 1e3);
       const tmp = e.file + ".acftmp";
       writeFileSync(tmp, JSON.stringify(out, null, 4) + "\n");
@@ -22929,10 +23510,10 @@ function writeGroupFilesAtomic(entries) {
 }
 function commit(entries, dryRun, summary, details) {
   if (dryRun) {
-    const preview = entries.map((e) => ({ file: e.file, group: stripFileKey(e.group) }));
+    const preview = entries.map((e) => ({ file: e.file, group: stripSynthetic(e.group) }));
     return { content: [{ type: "text", text: "DRY RUN \u2014 no files written.\n" + summary }], details: { ...details, dryRun: true, files: entries.map((e) => e.file), preview } };
   }
-  writeGroupFilesAtomic(entries);
+  writeAcfFilesAtomic(entries);
   invalidateIndex();
   return { content: [{ type: "text", text: summary }], details: { ...details, writtenFiles: entries.map((e) => e.file) } };
 }
@@ -23003,6 +23584,18 @@ Pass an explicit projectRoot that points at a single acf-json dir, or remove the
   }
   return { group: matches[0] };
 }
+function resolveOneUiObject(idx, key) {
+  const matches = idx.uiObjects.filter((o) => o.key === key);
+  if (matches.length === 0) return { error: `UI object ${key} not found (post types, taxonomies and options pages are keyed post_type_/taxonomy_/ui_options_page_)` };
+  if (matches.length > 1) {
+    return {
+      error: `${key} is ambiguous \u2014 the same key exists in ${matches.length} files:
+  ` + matches.map((m) => m._file).join("\n  ") + `
+Pass an explicit projectRoot that points at a single acf-json dir, or remove the duplicate copy before mutating.`
+    };
+  }
+  return { object: matches[0] };
+}
 function resolveProjectRoot(params, ctx) {
   if (typeof params.projectRoot === "string" && params.projectRoot.length > 0) return resolve3(params.projectRoot);
   if (ctx?.cwd) return resolve3(ctx.cwd);
@@ -23072,7 +23665,7 @@ function registerTools(server2) {
   server2.registerTool(
     "acf_validate",
     {
-      description: "Validate ACF field group JSON structure: required keys, key format, collisions, parent_repeater/clone/conditional_logic resolution, layouts dict. Severity-tagged findings.",
+      description: "Validate ACF JSON: field group structure (required keys, key format, collisions, parent_repeater/clone/conditional_logic resolution, layouts dict) AND post type / taxonomy / options page objects (slug rules, reserved terms, duplicate menu_slug, object_type references). Pass a group_/post_type_/taxonomy_/ui_options_page_ key to scope it. Severity-tagged findings.",
       inputSchema: {
         groupKey: external_exports.string().optional(),
         projectRoot: external_exports.string().optional()
@@ -23081,7 +23674,8 @@ function registerTools(server2) {
     async ({ groupKey, projectRoot }) => guard(() => {
       const root = resolveProjectRoot({ projectRoot }, ctxCwd());
       const idx = getIndex(root);
-      const findings = validate(idx, groupKey);
+      const uiScoped = typeof groupKey === "string" && uiKindOf(groupKey) !== null;
+      const findings = uiScoped ? validateUiObjects(idx, groupKey) : [...validate(idx, groupKey), ...groupKey ? [] : validateUiObjects(idx)];
       const errorCount = findings.filter((f) => f.severity === "error").length;
       const warningCount = findings.filter((f) => f.severity === "warning").length;
       const infoCount = findings.filter((f) => f.severity === "info").length;
@@ -23155,7 +23749,7 @@ function registerTools(server2) {
         fields.push(newField);
       }
       const file = g._file;
-      writeGroupFile(file, raw);
+      writeAcfFile(file, raw);
       invalidateIndex();
       const fieldKey = typeof newField["key"] === "string" ? newField["key"] : "";
       const summary = `Added field ${fieldKey} (${field.name}) to ${groupKey} at ${file}. Validate? run acf_validate.`;
@@ -23185,7 +23779,7 @@ function registerTools(server2) {
       const result = planMove(idx, { from, to });
       if (result.errors.length > 0) return fail(result.errors.join("; "));
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug }));
-      writeGroupFilesAtomic(entries);
+      writeAcfFilesAtomic(entries);
       const writtenFiles = entries.map((e) => e.file);
       invalidateIndex();
       const summary = `Moved field ${from.fieldKey} from ${from.groupKey} to ${to.groupKey}.`;
@@ -23212,7 +23806,7 @@ function registerTools(server2) {
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Cloned layout ${layoutKey} -> ${result.newLayoutKey} (${newName}) in ${groupKey}.`;
       return ok(summary, { newLayoutKey: result.newLayoutKey, groupKey, file: g._file });
@@ -23290,7 +23884,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Reordered field ${fieldKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
       return ok(summary, { fieldKey, fromIndex: result.fromIndex, toIndex: result.toIndex, file: g._file });
@@ -23313,7 +23907,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const entries = result.updatedGroups.map((ug) => ({ file: ug._file, group: ug }));
       const writtenFiles = entries.map((e) => e.file);
       if (entries.length > 0) {
-        writeGroupFilesAtomic(entries);
+        writeAcfFilesAtomic(entries);
         invalidateIndex();
       }
       const summary = result.changes.length > 0 ? `Repaired ${writtenFiles.length} group(s):
@@ -23340,7 +23934,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Updated field ${fieldKey} in ${groupKey} (${Object.keys(patch).join(", ")}).`;
       return ok(summary, { fieldKey, groupKey, file: g._file });
@@ -23367,7 +23961,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Added layout ${result.newLayoutKey} (${name}) to ${flexFieldKey} in ${groupKey}.`;
       return ok(summary, { newLayoutKey: result.newLayoutKey, groupKey, file: g._file });
@@ -23391,7 +23985,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Removed layout ${layoutKey} from ${groupKey}.`;
       return ok(summary, { layoutKey, groupKey, file: g._file });
@@ -23416,7 +24010,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Reordered layout ${layoutKey} in ${groupKey}: index ${result.fromIndex} -> ${result.toIndex}.`;
       return ok(summary, { layoutKey, fromIndex: result.fromIndex, toIndex: result.toIndex, file: g._file });
@@ -23442,7 +24036,7 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       const gr = resolveOneGroup(idx, groupKey);
       if ("error" in gr) return fail(gr.error);
       const g = gr.group;
-      writeGroupFile(g._file, result.updatedGroup);
+      writeAcfFile(g._file, result.updatedGroup);
       invalidateIndex();
       const summary = `Renamed layout ${layoutKey} in ${groupKey}.`;
       return ok(summary, { layoutKey, groupKey, file: g._file });
@@ -23586,6 +24180,167 @@ WARNING: still referenced by clone in ${result.cloneReferrers.length} field(s): 
       return ok(lines.length > 0 ? lines.join("\n") : "No groups found.", { groupCount: idx.groups.length });
     })
   );
+  server2.registerTool(
+    "acf_list_ui_objects",
+    {
+      description: "List the ACF post types (post_type_*.json), taxonomies (taxonomy_*.json) and options pages (ui_options_page_*.json) defined in this project: kind, key, title, slug, active flag, file. Optionally filter by kind.",
+      inputSchema: {
+        kind: external_exports.enum(["post_type", "taxonomy", "options_page"]).optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async ({ kind, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const text = outlineUiObjects(idx, kind);
+      const counted = kind ? idx.uiObjects.filter((o) => o._kind === kind) : idx.uiObjects;
+      return ok(text.length > 0 ? text : "No ACF post types, taxonomies or options pages found.", { count: counted.length });
+    })
+  );
+  server2.registerTool(
+    "acf_create_post_type",
+    {
+      description: `Create an ACF post type (post_type_<key>.json) with ACF 6.x defaults and the full auto-generated label set. Pass singular + plural for correct labels (they default to title, which is only right for words like "News"). Enforces ACF's key rules: max 20 chars, [a-z0-9_-], not a WordPress reserved term, not already used. dryRun previews. Run acf_sync afterwards to register it in the database.`,
+      inputSchema: {
+        title: external_exports.string(),
+        postType: external_exports.string(),
+        singular: external_exports.string().optional(),
+        plural: external_exports.string().optional(),
+        description: external_exports.string().optional(),
+        supports: external_exports.array(external_exports.string()).optional(),
+        taxonomies: external_exports.array(external_exports.string()).optional(),
+        hierarchical: external_exports.boolean().optional(),
+        isPublic: external_exports.boolean().optional(),
+        showInRest: external_exports.boolean().optional(),
+        hasArchive: external_exports.boolean().optional(),
+        archiveSlug: external_exports.string().optional(),
+        rewriteSlug: external_exports.string().optional(),
+        menuIcon: external_exports.string().optional(),
+        menuPosition: external_exports.number().int().optional(),
+        labels: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+        active: external_exports.boolean().optional(),
+        menuOrder: external_exports.number().int().optional(),
+        overrides: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+        dryRun: external_exports.boolean().optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildPostType(idx, args), `post type "${args.postType}"`))
+  );
+  server2.registerTool(
+    "acf_create_taxonomy",
+    {
+      description: "Create an ACF taxonomy (taxonomy_<key>.json) attached to one or more post types, with ACF 6.x defaults and the auto-generated label set for its hierarchy style (hierarchical = category-like, otherwise tag-like). Enforces ACF's key rules: max 32 chars, [a-z0-9_-], not a WordPress reserved term, not already used. dryRun previews. Run acf_sync afterwards to register it in the database.",
+      inputSchema: {
+        title: external_exports.string(),
+        taxonomy: external_exports.string(),
+        objectType: external_exports.array(external_exports.string()),
+        singular: external_exports.string().optional(),
+        plural: external_exports.string().optional(),
+        description: external_exports.string().optional(),
+        hierarchical: external_exports.boolean().optional(),
+        isPublic: external_exports.boolean().optional(),
+        showInRest: external_exports.boolean().optional(),
+        showAdminColumn: external_exports.boolean().optional(),
+        rewriteSlug: external_exports.string().optional(),
+        labels: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+        active: external_exports.boolean().optional(),
+        menuOrder: external_exports.number().int().optional(),
+        overrides: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+        dryRun: external_exports.boolean().optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildTaxonomy(idx, args), `taxonomy "${args.taxonomy}"`))
+  );
+  server2.registerTool(
+    "acf_create_options_page",
+    {
+      description: `Create an ACF options page (ui_options_page_<key>.json). menu_slug defaults to a slug of the title and is what a field group's options_page location rule must reference. Set parentSlug for a sub-page (e.g. "edit.php?post_type=cpt_resource" or another options page's menu_slug); leave it empty for a top-level admin menu item. dryRun previews. Run acf_sync afterwards to register it in the database.`,
+      inputSchema: {
+        title: external_exports.string(),
+        menuSlug: external_exports.string().optional(),
+        pageTitle: external_exports.string().optional(),
+        menuTitle: external_exports.string().optional(),
+        parentSlug: external_exports.string().optional(),
+        capability: external_exports.string().optional(),
+        position: external_exports.string().optional(),
+        iconUrl: external_exports.string().optional(),
+        redirect: external_exports.boolean().optional(),
+        description: external_exports.string().optional(),
+        dataStorage: external_exports.enum(["options", "post_id"]).optional(),
+        postId: external_exports.string().optional(),
+        autoload: external_exports.boolean().optional(),
+        updateButton: external_exports.string().optional(),
+        updatedMessage: external_exports.string().optional(),
+        active: external_exports.boolean().optional(),
+        menuOrder: external_exports.number().int().optional(),
+        overrides: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
+        dryRun: external_exports.boolean().optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async (args) => guard(() => createUiObject(args, (idx) => buildOptionsPage(idx, args), `options page "${args.title}"`))
+  );
+  server2.registerTool(
+    "acf_update_ui_object",
+    {
+      description: "Edit an existing post type / taxonomy / options page IN PLACE by key (labels, supports, rewrite, object_type, menu_slug, capability, active, \u2026). The key is preserved so the ACF database row and any location rules keep resolving. Objects deep-merge; arrays and scalars replace. Refuses key changes. dryRun previews.",
+      inputSchema: {
+        key: external_exports.string(),
+        patch: external_exports.record(external_exports.string(), external_exports.unknown()),
+        dryRun: external_exports.boolean().optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async ({ key, patch, dryRun, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const resolved = resolveOneUiObject(idx, key);
+      if ("error" in resolved) return fail(resolved.error);
+      const result = updateUiObject(idx, key, patch);
+      if (result.errors.length > 0) return fail(result.errors.join("; "));
+      const file = resolved.object._file;
+      const summary = `Updated ${resolved.object._kind} ${key} (${Object.keys(patch).join(", ")}).`;
+      const r = commit([{ file, group: result.updated }], dryRun === true, summary, { key, kind: resolved.object._kind });
+      return ok(r.content[0]?.text ?? summary, r.details);
+    })
+  );
+  server2.registerTool(
+    "acf_delete_ui_object",
+    {
+      description: "Delete a post type / taxonomy / options page JSON file by key. dryRun previews. Field groups whose location rules target it are NOT updated \u2014 run acf_validate after. Deleting the JSON does not unregister it from the database; remove it in the ACF admin too.",
+      inputSchema: {
+        key: external_exports.string(),
+        dryRun: external_exports.boolean().optional(),
+        projectRoot: external_exports.string().optional()
+      }
+    },
+    async ({ key, dryRun, projectRoot }) => guard(() => {
+      const root = resolveProjectRoot({ projectRoot }, ctxCwd());
+      const idx = getIndex(root);
+      const resolved = resolveOneUiObject(idx, key);
+      if ("error" in resolved) return fail(resolved.error);
+      const o = resolved.object;
+      const summary = `${dryRun === true ? "Would delete" : "Deleted"} ${o._kind} ${key} (${o._file}).`;
+      if (dryRun === true) return ok("DRY RUN \u2014 no files written.\n" + summary, { dryRun: true, key, kind: o._kind, file: o._file });
+      unlinkSync2(o._file);
+      invalidateIndex();
+      return ok(summary, { key, kind: o._kind, file: o._file });
+    })
+  );
+  function createUiObject(args, build, label) {
+    const root = resolveProjectRoot({ projectRoot: args.projectRoot }, ctxCwd());
+    const idx = getIndex(root);
+    const dirs = findAcfJsonDirs(root);
+    if (dirs.length === 0) return fail(`no acf-json directory found under ${root}`);
+    const result = build(idx);
+    if (result.errors.length > 0) return fail(result.errors.join("; "));
+    const file = join4(dirs[0] ?? "", `${result.key}.json`);
+    const summary = `Created ${result.object._kind} ${result.key} \u2014 ${label} at ${file}. Run acf_sync to register it in WordPress.`;
+    const r = commit([{ file, group: result.object }], args.dryRun === true, summary, { key: result.key, kind: result.object._kind });
+    return ok(r.content[0]?.text ?? summary, r.details);
+  }
 }
 
 // src/index.ts

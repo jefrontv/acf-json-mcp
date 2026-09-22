@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MCP server for safely editing ACF acf-json/*.json — field groups plus post types, taxonomies and options pages: collision-free keys, type-correct defaults, back-ref integrity, validation, and WP DB sync. Installable into Claude Code, Cursor, and any MCP client.",
+  "description": "MCP server for safely editing ACF acf-json/*.json \u2014 field groups plus post types, taxonomies and options pages: collision-free keys, type-correct defaults, back-ref integrity, validation, and WP DB sync. Installable into Claude Code, Cursor, and any MCP client.",
   "bin": {
     "acf-json-mcp": "./dist/index.js"
   },
@@ -26,10 +26,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "esbuild": "^0.24.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
     "typescript": "^5.6.0",
     "@types/node": "^26.0.1"
   }

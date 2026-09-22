@@ -60,10 +60,8 @@ All tools take an optional `projectRoot` (default: the `ACF_JSON_PROJECT_ROOT` e
 
 ### One-line installer (clone + build + register with Claude Code)
 
-Private Bitbucket repo → use SSH clone, not `npx <raw-url>` (raw URLs return 404 to unauthenticated fetches):
-
 ```sh
-git clone git@bitbucket.org:efront_au/acf-json-mcp.git && cd acf-json-mcp && npm run install:claude
+git clone https://github.com/jefrontv/acf-json-mcp.git && cd acf-json-mcp && npm run install:claude
 ```
 
 What it does:
@@ -102,12 +100,30 @@ cd <path-to-clone> && npm run install:claude
 
 The installer fetches + fast-forwards to `origin/master`, reinstalls deps, rebuilds `dist/index.js`, and re-registers with Claude Code (no-op if already registered). If you have local commits that diverge from `origin/master`, the `--ff-only` merge fails safely with a clear error — resolve manually, then re-run.
 
+Checkouts cloned while the project lived on Bitbucket still point `origin` there, so the installer would fetch a repo that is no longer updated. Re-point it once:
+
+```sh
+git remote set-url origin https://github.com/jefrontv/acf-json-mcp.git
+git fetch origin && git merge --ff-only origin/master
+```
+
 There is no in-app auto-update. The MCP server has no notion of its own version; updates come from re-running the installer. Claude Code picks up the new `dist/index.js` on the next MCP session restart.
+
+### Releases and versioning
+
+`package.json` holds the version and every release is tagged `v<version>`.
+
+```sh
+npm version patch -m "chore: release v%s"   # or minor / major
+git push --follow-tags
+```
+
+Then write the GitHub release notes (`gh release edit v<version> --notes …`) — the tag alone is not the release. `master` carries unreleased work; the installer always pulls `master`, so a tag marks a known-good snapshot rather than a separate channel.
 
 ### Manual
 
 ```sh
-git clone git@bitbucket.org:efront_au/acf-json-mcp.git && cd acf-json-mcp
+git clone https://github.com/jefrontv/acf-json-mcp.git && cd acf-json-mcp
 npm install
 npm run build      # -> dist/index.js (bundled, self-contained)
 ```

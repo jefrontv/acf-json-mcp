@@ -9,7 +9,7 @@
 //   node scripts/install.mjs
 //
 // What it does:
-//   1. Clones efrent_au/acf-json-mcp into ~/Documents/Sites/acf-json-mcp
+//   1. Clones jefrontv/acf-json-mcp into ~/Documents/Sites/acf-json-mcp
 //      (or --dest <path>). Skips if already present.
 //   2. npm install
 //   3. npm run build -> dist/index.js
@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REPO = "git@bitbucket.org:efront_au/acf-json-mcp.git";
+const REPO = "https://github.com/jefrontv/acf-json-mcp.git";
 const DEFAULT_DEST = resolve(process.env.HOME ?? "", "Documents/Sites/acf-json-mcp");
 // If this script is being run from inside a checkout (scripts/install.mjs
 // resolves under cwd), operate on that checkout rather than the default dest.

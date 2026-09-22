@@ -13,6 +13,7 @@
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js",
     "build:bun": "bun build src/index.ts --compile --outfile dist/acf-json-mcp",
     "prebuild": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\"",
+    "prepare": "npm run build",
     "add-claude": "node scripts/add-claude.mjs",
     "install:claude": "node scripts/install.mjs",
     "test": "node tests/run-all.mjs",
